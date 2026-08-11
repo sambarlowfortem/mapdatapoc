@@ -1,0 +1,46 @@
+[gd_scene format=3 uid="uid://bdyu1rby8lbk"]
+
+[ext_resource type="Script" uid="uid://b1ca0ky4pmsbc" path="res://scripts/mvt_tile_renderer.gd" id="1_o5qli"]
+[ext_resource type="Script" uid="uid://bu5jmm2mb1m6v" path="res://scripts/main.gd" id="1_sugp2"]
+[ext_resource type="Script" uid="uid://brf6xccu2y4yu" path="res://scenes/terrain_rgb_loader.gd" id="2_0wfyh"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0wfyh"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_sugp2"]
+sky_material = SubResource("ProceduralSkyMaterial_0wfyh")
+
+[sub_resource type="Environment" id="Environment_jyhfs"]
+background_mode = 2
+sky = SubResource("Sky_sugp2")
+glow_enabled = true
+
+[node name="Node3D" type="Node3D" unique_id=1834195575]
+script = ExtResource("1_sugp2")
+terrain_path = NodePath("Node3D")
+tile_path = NodePath("Tile")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=866268120]
+environment = SubResource("Environment_jyhfs")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1114461686]
+transform = Transform3D(-0.8660254, -0.43301278, 0.25, 0, 0.49999997, 0.86602545, -0.50000006, 0.75, -0.43301266, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Tile" type="Node3D" parent="." unique_id=609767828]
+script = ExtResource("1_o5qli")
+high_detail_url_template = "https://api.maptiler.com/tiles/v3/{z}/{x}/{y}.pbf?key=2Bb9P9YUVDxBT88Aj26I"
+url_template = "http://172.16.0.250:8089/data/vector/{z}/{x}/{y}.pbf"
+outer_url_template = "http://172.16.0.250:8089/data/vector/{z}/{x}/{y}.pbf"
+tile_z = 14
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1059086227]
+transform = Transform3D(0.99998045, -0.006058015, 0.001539601, 0.0046187844, 0.88211477, 0.47101188, -0.0042115017, -0.47099555, 0.8821255, -5445.339, 1766.109, 5001.919)
+far = 100000.0
+
+[node name="Node3D" type="Node3D" parent="." unique_id=1784134145]
+script = ExtResource("2_0wfyh")
+url_template = "http://172.16.0.250:8089/data/terrain/{z}/{x}/{y}.webp"
+grid_radius = 1
+vector_tile_path = NodePath("../Tile")
