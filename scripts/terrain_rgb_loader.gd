@@ -124,9 +124,13 @@ func _start_vector_tile() -> void:
 
 ## Samples the decoded terrain elevation directly under `global_pos` (only
 ## its x/z are used), picking whichever loaded grid tile actually covers
-## that position. Returns 0.0 if no loaded tile covers it. Used by
-## MVTTileRenderer to drape its own geometry onto this terrain's surface,
-## vertex by vertex.
+## that position, then interpolating across the SAME strided grid quad
+## (and diagonal triangle split) that _build_heightmap() actually renders -
+## so draped features (ground/roads/buildings) land exactly on the visible
+## terrain surface instead of an independently-sampled nearest pixel that
+## can disagree with it slightly (a real source of z-fighting/gaps against
+## the terrain mesh, not just an ordering problem). Returns 0.0 if no
+## loaded tile covers it.
 func get_elevation_at_global(global_pos: Vector3) -> float:
 	if tile_size_meters == 0.0:
 		return 0.0
@@ -137,10 +141,42 @@ func get_elevation_at_global(global_pos: Vector3) -> float:
 	if not _tile_images.has(key):
 		return 0.0
 	var img: Image = _tile_images[key]
+	var cols = max(1, img.get_width() / sample_stride)
+	var rows = max(1, img.get_height() / sample_stride)
+
 	var fx: float = clamp(local.x / tile_size_meters - cx + 0.5, 0.0, 1.0)
 	var fz: float = clamp(local.z / tile_size_meters - cy + 0.5, 0.0, 1.0)
-	var px: int = clamp(int(round(fx * img.get_width())), 0, img.get_width() - 1)
-	var py: int = clamp(int(round(fz * img.get_height())), 0, img.get_height() - 1)
+
+	# Continuous position in the same grid space _build_heightmap() uses.
+	var gx_cont: float = clamp(fx * cols, 0.0, float(cols))
+	var gy_cont: float = clamp(fz * rows, 0.0, float(rows))
+	var gx0: int = clamp(int(gx_cont), 0, cols - 1)
+	var gy0: int = clamp(int(gy_cont), 0, rows - 1)
+	var u: float = gx_cont - gx0
+	var v: float = gy_cont - gy0
+
+	var h00 := _sample_grid_elevation(img, gx0, gy0)
+	var h10 := _sample_grid_elevation(img, gx0 + 1, gy0)
+	var h01 := _sample_grid_elevation(img, gx0, gy0 + 1)
+	var h11 := _sample_grid_elevation(img, gx0 + 1, gy0 + 1)
+
+	# Same diagonal split _build_heightmap() triangulates: (p00,p10,p11)
+	# covers u>=v, (p00,p11,p01) covers v>=u - barycentric height on
+	# whichever triangle (u,v) actually falls in.
+	if u >= v:
+		return h00 * (1.0 - u) + h10 * (u - v) + h11 * v
+	else:
+		return h00 * (1.0 - v) + h01 * (v - u) + h11 * u
+
+
+## Elevation at strided grid point (gx, gy) of `img`, decoded exactly the
+## way _build_heightmap() samples its height grid - shared so
+## get_elevation_at_global() always interpolates the identical surface the
+## mesh was actually built from, rather than a separately-tuned lookup that
+## could drift out of sync with it.
+func _sample_grid_elevation(img: Image, gx: int, gy: int) -> float:
+	var px: int = min(gx * sample_stride, img.get_width() - 1)
+	var py: int = min(gy * sample_stride, img.get_height() - 1)
 	return _decode_elevation(img.get_pixel(px, py)) * height_exaggeration
 
 
@@ -173,14 +209,14 @@ func _build_heightmap(img: Image, offset: Vector3, mesh_name: String) -> void:
 	var rows = max(1, h / sample_stride)
 
 	# Precompute the height grid first (avoids re-decoding shared corners).
+	# Shares _sample_grid_elevation with get_elevation_at_global() so that
+	# function always interpolates the exact surface built here.
 	var heights := []
 	for gy in range(rows + 1):
-		var py: int = min(gy * sample_stride, h - 1)
 		var row := PackedFloat32Array()
 		row.resize(cols + 1)
 		for gx in range(cols + 1):
-			var px: int = min(gx * sample_stride, w - 1)
-			row[gx] = _decode_elevation(img.get_pixel(px, py)) * height_exaggeration
+			row[gx] = _sample_grid_elevation(img, gx, gy)
 		heights.append(row)
 
 	var st := SurfaceTool.new()

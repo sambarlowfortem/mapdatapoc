@@ -70,6 +70,13 @@ class_name MVTTileRenderer
 ## position, no artificial lift.
 @export var drape_height_offset: float = 0.0
 
+## How far (meters) building walls extend below their sampled base
+## elevation - a foundation "skirt" so there's never a visible gap under a
+## building on sloped terrain, since base_y is sampled once at the
+## footprint's centroid (see _add_building) and terrain can dip below that
+## single sample anywhere else under the footprint.
+@export var building_foundation_depth: float = 20.0
+
 const GEOM_POINT := MVTParser.GEOM_POINT
 const GEOM_LINESTRING := MVTParser.GEOM_LINESTRING
 const GEOM_POLYGON := MVTParser.GEOM_POLYGON
@@ -226,13 +233,13 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 
 	print("MVTTileRenderer: loaded %d/%d tiles (center %s)" % [loaded, total, "high-detail" if used_high_detail else "fallback"])
 
-	_finalize_mesh(st_ground, "GroundLayers", counts.x, 0)
-	_finalize_mesh(st_lines, "Lines", counts.y, 1)
-	_finalize_mesh(st_buildings, "Buildings", counts.z, 2, true, BaseMaterial3D.CULL_BACK)
+	_finalize_mesh(st_ground, "GroundLayers", counts.x, 0, false)
+	_finalize_mesh(st_lines, "Lines", counts.y, 0, false)
+	_finalize_mesh(st_buildings, "Buildings", counts.z, 0, false, BaseMaterial3D.CULL_BACK)
 
-	_finalize_mesh(st_outer_ground, "OuterGroundLayers", outer_counts.x, -3)
-	_finalize_mesh(st_outer_lines, "OuterLines", outer_counts.y, -2)
-	_finalize_mesh(st_outer_buildings, "OuterBuildings", outer_counts.z, -1, true, BaseMaterial3D.CULL_BACK)
+	_finalize_mesh(st_outer_ground, "OuterGroundLayers", outer_counts.x, 0, false)
+	_finalize_mesh(st_outer_lines, "OuterLines", outer_counts.y, 0, false)
+	_finalize_mesh(st_outer_buildings, "OuterBuildings", outer_counts.z, 0, false, BaseMaterial3D.CULL_BACK)
 
 
 ## Fetches `url` and returns the raw response body, or an empty array on any
@@ -380,8 +387,8 @@ func _add_building(st: SurfaceTool, rings: Array, extent: int, height: float, co
 		for i in range(n):
 			var a: Vector2 = world_ring[i] + world_offset
 			var b: Vector2 = world_ring[(i + 1) % n] + world_offset
-			var a0 := Vector3(a.x, base_y, a.y)
-			var b0 := Vector3(b.x, base_y, b.y)
+			var a0 := Vector3(a.x, base_y - building_foundation_depth, a.y)
+			var b0 := Vector3(b.x, base_y - building_foundation_depth, b.y)
 			var a1 := Vector3(a.x, base_y + height, a.y)
 			var b1 := Vector3(b.x, base_y + height, b.y)
 			st.set_color(wall_color); st.add_vertex(a0)
@@ -428,22 +435,13 @@ func _add_line(st: SurfaceTool, rings: Array, extent: int, width: float, color: 
 	return count
 
 
-## `render_priority` controls draw order relative to the OTHER map-element
-## meshes (ground/lines/buildings) - higher draws on top. When
-## `no_depth_test` is true, the terrain (a separate, normal opaque object)
-## can never win a depth conflict against this one: it always draws over
-## whatever's already there. Ground (priority 0) < lines (1) < buildings
-## (2), so buildings draw over roads/ground and roads draw over ground,
-## deterministically, regardless of true depth vs. terrain OR each other.
-##
-## Buildings additionally use CULL_BACK instead of the default
-## CULL_DISABLED: with no_depth_test on, double-sided rendering let a
-## building's own back/interior faces fight its front faces for the same
-## pixels with no depth buffer to resolve them, which looked like flickery,
-## inside-out geometry. Backface culling alone resolves that for ordinary
-## convex building footprints (confirmed by rendering and inspecting the
-## output - see the conversation this was tuned in), without needing real
-## depth testing.
+## All meshes (ground, lines, buildings) use normal depth testing against
+## the terrain and each other - the small per-layer Y offsets applied in
+## _render_layers (water, roads, waterways) are what keep those from
+## z-fighting, not this function. Buildings use CULL_BACK instead of the
+## default CULL_DISABLED so their own back/interior faces don't compete
+## with front faces for the same pixels; ordinary convex building
+## footprints render correctly with backface culling alone.
 func _finalize_mesh(st: SurfaceTool, node_name: String, vertex_count: int, render_priority: int = 0, no_depth_test: bool = true, cull_mode: BaseMaterial3D.CullMode = BaseMaterial3D.CULL_DISABLED) -> void:
 	if vertex_count == 0:
 		return

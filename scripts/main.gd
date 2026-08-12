@@ -35,5 +35,25 @@ func _ready() -> void:
 
 	# terrain.start_loading() also triggers the vector tile (via
 	# vector_tile_path -> render_draped()) once the terrain grid is ready -
-	# see TerrainRGBLoader._start_vector_tile().
-	terrain.start_loading()
+	# see TerrainRGBLoader._start_vector_tile(). Awaited here (rather than
+	# fired-and-forgotten) so the marker below can sample ground elevation
+	# once the terrain tiles it needs have actually loaded.
+	await terrain.start_loading()
+
+	_place_lat_lon_marker(terrain)
+
+
+## Drops a Marker3D at the exact (lat, lon) from above, sitting on the
+## terrain surface (not a flat y) - useful for eyeballing that the lat/lon ->
+## world-space math lines up with the rendered terrain/vector tiles. Note:
+## Marker3D only draws its gizmo cross in the editor viewport, not in the
+## actual running game window.
+func _place_lat_lon_marker(terrain: TerrainRGBLoader) -> void:
+	var local_xz := TileSource.lat_lon_to_world(lat, lon, terrain.tile_z, terrain.tile_x, terrain.tile_y)
+	var global_pos := terrain.to_global(Vector3(local_xz.x, 0.0, local_xz.y))
+	global_pos.y = terrain.get_elevation_at_global(global_pos)
+
+	var marker := Marker3D.new()
+	marker.name = "LatLonMarker"
+	add_child(marker)
+	marker.global_position = global_pos

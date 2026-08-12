@@ -20,6 +20,18 @@ static func world_offset(z: int, x: int, y: int, origin_z: int, origin_x: int, o
 	return Vector2(fx, fz) * EARTH_CIRCUMFERENCE_M
 
 
+## World-space (x, z) position of (lat, lon) relative to the center of tile
+## (origin_z,origin_x,origin_y) - like world_offset(), but for an exact
+## lat/lon instead of a tile index, using the same continuous Web Mercator
+## projection lat_lon_to_tile() floors to get a tile coordinate.
+static func lat_lon_to_world(lat: float, lon: float, origin_z: int, origin_x: int, origin_y: int) -> Vector2:
+	var n := pow(2.0, origin_z)
+	var lat_rad := deg_to_rad(lat)
+	var fx := (lon + 180.0) / 360.0 * n
+	var fy := (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) / 2.0 * n
+	return Vector2(fx - (float(origin_x) + 0.5), fy - (float(origin_y) + 0.5)) * (EARTH_CIRCUMFERENCE_M / n)
+
+
 ## Substitutes {z}/{x}/{y} placeholders in a URL template.
 static func url_for(template: String, z: int, x: int, y: int) -> String:
 	return template.replace("{z}", str(z)).replace("{x}", str(x)).replace("{y}", str(y))
