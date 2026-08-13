@@ -3,9 +3,7 @@
 [ext_resource type="Script" uid="uid://bu5jmm2mb1m6v" path="res://scripts/main.gd" id="1_tkkoo"]
 [ext_resource type="Script" uid="uid://b1ca0ky4pmsbc" path="res://scripts/mvt_tile_renderer.gd" id="2_sej2h"]
 [ext_resource type="Script" uid="uid://brf6xccu2y4yu" path="res://scripts/terrain_rgb_loader.gd" id="3_tkkoo"]
-[ext_resource type="Script" uid="uid://ot6p7tlw064g" path="res://scenes/mesh_instance_3d.gd" id="4_sej2h"]
 [ext_resource type="Script" uid="uid://lrptk5t6136a" path="res://scripts/_tmp_screenshot.gd" id="5_tmpshot"]
-[ext_resource type="Script" uid="uid://cjfqytdui4jkn" path="res://scripts/terrain_debug_label.gd" id="6_dbglbl"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0wfyh"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -18,9 +16,6 @@ sky_material = SubResource("ProceduralSkyMaterial_0wfyh")
 background_mode = 2
 sky = SubResource("Sky_sugp2")
 glow_enabled = true
-
-[sub_resource type="BoxMesh" id="BoxMesh_8xy7y"]
-size = Vector3(10, 10, 10)
 
 [node name="Node3D" type="Node3D" unique_id=1834195575]
 script = ExtResource("1_tkkoo")
@@ -42,7 +37,7 @@ outer_url_template = "http://172.16.0.250:8089/data/vector/{z}/{x}/{y}.pbf"
 tile_z = 14
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1059086227]
-transform = Transform3D(1, 0, 0, 0, 0.83195406, 0.5548445, 0, -0.5548445, 0.83195406, -0.63147926, 73.005585, 113.49589)
+transform = Transform3D(1, 0, 0, 0, 0.83195406, 0.5548445, 0, -0.5548445, 0.83195406, -5910.631, 973.006, -3916.504)
 far = 100000.0
 
 [node name="Node3D" type="Node3D" parent="." unique_id=1784134145]
@@ -51,25 +46,5 @@ url_template = "http://172.16.0.250:8089/data/terrain/{z}/{x}/{y}.webp"
 grid_radius = 1
 vector_tile_path = NodePath("../Tile")
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=829726503]
-mesh = SubResource("BoxMesh_8xy7y")
-script = ExtResource("4_sej2h")
-
 [node name="TmpScreenshot" type="Node" parent="." unique_id=1005912945]
 script = ExtResource("5_tmpshot")
-
-[node name="OriginMarker" type="Marker3D" parent="." unique_id=1169683363]
-transform = Transform3D(0.72071797, 0, 0.6932284, 0, 1, 0, -0.6932284, 0, 0.72071797, -4396.599, 3.46, -5903.435)
-
-[node name="DebugCanvas" type="CanvasLayer" parent="." unique_id=717347366]
-
-[node name="DebugLabel" type="Label" parent="DebugCanvas" unique_id=2108857201]
-offset_left = 20.0
-offset_top = 20.0
-offset_right = 900.0
-offset_bottom = 60.0
-theme_override_font_sizes/font_size = 24
-text = "Terrain elevation: --"
-script = ExtResource("6_dbglbl")
-terrain_path = NodePath("../../Node3D")
-marker_path = NodePath("../../OriginMarker")

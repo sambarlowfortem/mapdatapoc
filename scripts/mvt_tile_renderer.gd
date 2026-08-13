@@ -92,36 +92,42 @@ const GEOM_POINT := MVTParser.GEOM_POINT
 const GEOM_LINESTRING := MVTParser.GEOM_LINESTRING
 const GEOM_POLYGON := MVTParser.GEOM_POLYGON
 
+## Palette tuned to match a muted, low-saturation basemap style (dark navy
+## water, uniform sage-olive ground, pale cream road hierarchy, flat matte
+## gray buildings) - all classes stay in the same desaturated earth-tone
+## family instead of the more saturated per-class OSM colors this used to
+## use, so different land-use classes still read as distinct without
+## breaking the overall cohesive look.
 const LAYER_COLORS := {
-	"water": Color(0.25, 0.45, 0.75),
-	"landcover": Color(0.55, 0.68, 0.42),
-	"landuse": Color(0.62, 0.58, 0.5),
-	"building": Color(0.78, 0.74, 0.68),
+	"water": Color(0.09, 0.17, 0.28),
+	"landcover": Color(0.62, 0.64, 0.52),
+	"landuse": Color(0.62, 0.64, 0.52),
+	"building": Color(0.068, 0.07, 0.065, 1.0),
 }
 
 const LANDUSE_CLASS_COLORS := {
-	"residential": Color(0.75, 0.72, 0.66),
-	"commercial": Color(0.7, 0.62, 0.6),
-	"retail": Color(0.72, 0.65, 0.58),
-	"industrial": Color(0.6, 0.58, 0.62),
-	"park": Color(0.45, 0.65, 0.4),
-	"cemetery": Color(0.5, 0.6, 0.48),
-	"hospital": Color(0.85, 0.75, 0.75),
-	"theme_park": Color(0.8, 0.6, 0.75),
-	"pitch": Color(0.4, 0.68, 0.35),
+	"residential": Color(0.65, 0.65, 0.55),
+	"commercial": Color(0.6, 0.59, 0.51),
+	"retail": Color(0.62, 0.61, 0.52),
+	"industrial": Color(0.56, 0.57, 0.53),
+	"park": Color(0.5, 0.58, 0.42),
+	"cemetery": Color(0.55, 0.6, 0.48),
+	"hospital": Color(0.66, 0.6, 0.55),
+	"theme_park": Color(0.6, 0.55, 0.58),
+	"pitch": Color(0.48, 0.62, 0.4),
 }
 
 const ROAD_STYLE := {
-	"motorway": {"width": 18.0, "color": Color(0.95, 0.55, 0.2)},
-	"trunk": {"width": 16.0, "color": Color(0.95, 0.6, 0.3)},
-	"primary": {"width": 14.0, "color": Color(0.95, 0.75, 0.3)},
-	"secondary": {"width": 11.0, "color": Color(0.9, 0.85, 0.5)},
-	"tertiary": {"width": 9.0, "color": Color(0.85, 0.85, 0.7)},
-	"minor": {"width": 6.0, "color": Color(0.88, 0.88, 0.88)},
-	"service": {"width": 4.0, "color": Color(0.72, 0.72, 0.72)},
-	"rail": {"width": 3.0, "color": Color(0.3, 0.3, 0.3)},
+	"motorway": {"width": 18.0, "color": Color(0.9, 0.88, 0.8)},
+	"trunk": {"width": 16.0, "color": Color(0.88, 0.86, 0.78)},
+	"primary": {"width": 14.0, "color": Color(0.87, 0.85, 0.76)},
+	"secondary": {"width": 11.0, "color": Color(0.85, 0.83, 0.74)},
+	"tertiary": {"width": 9.0, "color": Color(0.83, 0.81, 0.72)},
+	"minor": {"width": 6.0, "color": Color(0.8, 0.79, 0.7)},
+	"service": {"width": 4.0, "color": Color(0.75, 0.74, 0.66)},
+	"rail": {"width": 3.0, "color": Color(0.35, 0.33, 0.3)},
 }
-const ROAD_STYLE_DEFAULT := {"width": 5.0, "color": Color(0.8, 0.8, 0.8)}
+const ROAD_STYLE_DEFAULT := {"width": 5.0, "color": Color(0.78, 0.77, 0.68)}
 
 var tile_size_meters: float = 0.0
 
@@ -517,7 +523,7 @@ func _collect_flat_layers(layers: Dictionary, world_offset: Vector2, ground_tris
 		var extent: int = layers["waterway"]["extent"]
 		for feat in layers["waterway"]["features"]:
 			if feat["type"] == GEOM_LINESTRING:
-				_collect_flat_line(line_quads, feat["rings"], extent, 2.0, Color(0.3, 0.5, 0.8), world_offset)
+				_collect_flat_line(line_quads, feat["rings"], extent, 2.0, Color(0.14, 0.26, 0.4), world_offset)
 
 
 ## Triangulates `rings` the same way _add_polygon_flat does, but keeps the
@@ -537,13 +543,6 @@ func _collect_flat_polygon(tris: Array, rings: Array, extent: int, color: Color,
 			var a: Vector2 = world_ring[indices[i]] + world_offset
 			var b: Vector2 = world_ring[indices[i + 1]] + world_offset
 			var c: Vector2 = world_ring[indices[i + 2]] + world_offset
-			# Real-world vector data has plenty of duplicate/near-collinear
-			# vertices, so triangulate_polygon() occasionally emits
-			# degenerate slivers alongside the real triangles - Godot's
-			# CanvasItem triangulator (draw_colored_polygon) rejects those
-			# outright ("Invalid polygon data"), so skip them here instead.
-			if absf((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) < 0.001:
-				continue
 			tris.append({"points": PackedVector2Array([a, b, c]), "color": color})
 
 
@@ -623,10 +622,11 @@ func _build_and_apply_ground_texture(ground_tris: Array, line_quads: Array, terr
 	# formula terrain_ground_texture.gdshader uses) - no flip needed.
 	var canvas := preload("res://scripts/ground_texture_canvas.gd").new()
 	var px_polys := []
-	for entry in ground_tris:
-		px_polys.append({"points": _to_px(entry["points"], bbox_min, mpp), "color": entry["color"]})
-	for entry in line_quads:
-		px_polys.append({"points": _to_px(entry["points"], bbox_min, mpp), "color": entry["color"]})
+	for entry in ground_tris + line_quads:
+		var px_points := _to_px(entry["points"], bbox_min, mpp)
+		if _fails_to_triangulate(px_points):
+			continue
+		px_polys.append({"points": px_points, "color": entry["color"]})
 	canvas.polygons = px_polys
 
 	var viewport := SubViewport.new()
@@ -657,6 +657,22 @@ func _to_px(points: PackedVector2Array, bbox_min: Vector2, mpp: float) -> Packed
 	for p in points:
 		out.append((p - bbox_min) / mpp)
 	return out
+
+
+## Both the pre-triangulated ground triangles (_collect_flat_polygon) and the
+## line ribbon quads (_collect_flat_line) come from real-world GIS data full
+## of near-duplicate/near-collinear vertices, and draw_colored_polygon()'s
+## internal triangulator rejects anything it can't find a valid ear for,
+## printing "Invalid polygon data, triangulation failed." Rather than
+## reinvent that validity check with a guessed area/epsilon threshold,
+## Geometry2D.triangulate_polygon() runs the same triangulation
+## draw_colored_polygon() does internally - if it can't triangulate a shape
+## either, draw_colored_polygon() won't - so an empty result here is a
+## direct, exact predictor of that failure, not a heuristic for it.
+func _fails_to_triangulate(points: PackedVector2Array) -> bool:
+	if points.size() < 3:
+		return true
+	return Geometry2D.triangulate_polygon(points).is_empty()
 
 
 ## Adds one tile's building features into `st_buildings` - shared across

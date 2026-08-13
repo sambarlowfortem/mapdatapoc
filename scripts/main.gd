@@ -2,12 +2,6 @@
 ## tile contains them - at each node's own configured zoom - for both the
 ## terrain and vector tile loaders, then kicks off loading.
 extends Node3D
-@onready var camera_3d: Camera3D = $Camera3D
-var camera_offset: Vector3
-@onready var mesh_instance_3d: MeshInstance3D = $MeshInstance3D
-@onready var origin_marker: Marker3D = $OriginMarker
-
-@onready var node_3d: TerrainRGBLoader = $Node3D
 
 ## Real-world coordinates (degrees) the scene should be centered on.
 ##fortem
@@ -29,7 +23,6 @@ var lon: float = -122.3385
 func _ready() -> void:
 	var terrain := get_node_or_null(terrain_path) as TerrainRGBLoader
 	var tile := get_node_or_null(tile_path) as MVTTileRenderer
-	camera_offset = camera_3d.position
 	if terrain == null:
 		push_warning("main: terrain_path %s not found or not a TerrainRGBLoader" % terrain_path)
 		return
@@ -56,11 +49,6 @@ func _ready() -> void:
 
 	_place_lat_lon_marker(terrain)
 
-func _process(delta: float) -> void:
-	mesh_instance_3d.position = Vector3(origin_marker.position.x, node_3d.get_elevation_at_global(origin_marker.position), origin_marker.position.z)
-	camera_3d.position = mesh_instance_3d.position + camera_offset
-	
-
 ## Drops a Marker3D at the exact (lat, lon) from above, sitting on the
 ## terrain surface (not a flat y) - useful for eyeballing that the lat/lon ->
 ## world-space math lines up with the rendered terrain/vector tiles. Note:
@@ -73,6 +61,5 @@ func _place_lat_lon_marker(terrain: TerrainRGBLoader) -> void:
 
 	var marker := Marker3D.new()
 	marker.name = "LatLonMarker"
-	#origin_marker.position = marker.position
 	add_child(marker)
 	marker.global_position = global_pos
