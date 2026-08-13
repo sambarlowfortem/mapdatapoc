@@ -54,6 +54,11 @@ class_name TerrainRGBLoader
 ## Requires a render_draped(terrain) method (MVTTileRenderer has one).
 @export var vector_tile_path: NodePath = ^""
 
+## Optional second node to trigger alongside vector_tile_path - normally a
+## SatelliteTileLoader. Left empty, nothing else is triggered. Also requires
+## a render_draped(terrain) method.
+@export var satellite_tile_path: NodePath = ^""
+
 ## Fallback/base terrain color, shown wherever apply_ground_texture()'s
 ## baked texture doesn't cover (or before it's applied at all).
 const BASE_GROUND_COLOR := Color(0.5, 0.55, 0.42)
@@ -63,6 +68,7 @@ const GROUND_TEXTURE_SHADER := preload("res://shaders/terrain_ground_texture.gds
 var tile_size_meters: float = 0.0
 var _tile_images: Dictionary = {}  # Vector2i(x,y) -> Image, keyed by actual tile coords
 var _terrain_meshes: Array[MeshInstance3D] = []
+var _ground_shader_mat: ShaderMaterial = null
 
 
 func start_loading() -> void:
@@ -78,7 +84,7 @@ func start_loading() -> void:
 	var loaded := 0
 	for i in range(coords.size()):
 		print("READY3 (%d/%d)" % [i + 1, coords.size()])
-		var data: PackedByteArray = await _http_get(TileSource.url_for(url_template, tile_z, coords[i].x, coords[i].y))
+		var data: PackedByteArray = await _cached_get(url_template, tile_z, coords[i].x, coords[i].y)
 		if data.is_empty():
 			continue
 		var img := _image_from_buffer(data, url_template)
@@ -93,7 +99,21 @@ func start_loading() -> void:
 		loaded += 1
 	print("TerrainRGBLoader: loaded %d/%d tiles" % [loaded, coords.size()])
 
-	_start_vector_tile()
+	_trigger_draped_renderer(vector_tile_path, "vector_tile_path")
+	_trigger_draped_renderer(satellite_tile_path, "satellite_tile_path")
+
+
+## Returns tile (z,x,y) from `template`'s on-disk cache (see TileCache) if
+## present, otherwise fetches it live and writes it to the cache on success.
+func _cached_get(template: String, z: int, x: int, y: int) -> PackedByteArray:
+	var cache_path := TileCache.path_for(template, z, x, y)
+	var cached := TileCache.read(cache_path)
+	if not cached.is_empty():
+		return cached
+	var data := await _http_get(TileSource.url_for(template, z, x, y))
+	if not data.is_empty():
+		TileCache.write(cache_path, data)
+	return data
 
 
 ## Fetches `url` and returns the raw response body, or an empty array on any
@@ -122,35 +142,55 @@ func _http_get(url: String) -> PackedByteArray:
 	return body
 
 
-func _start_vector_tile() -> void:
-	print("CALLING START VECTOR TILE")
-	if vector_tile_path.is_empty():
+func _trigger_draped_renderer(path: NodePath, export_name: String) -> void:
+	if path.is_empty():
 		return
-	var target := get_node_or_null(vector_tile_path)
+	var target := get_node_or_null(path)
 	if target == null:
-		push_warning("TerrainRGBLoader: vector_tile_path %s not found" % vector_tile_path)
+		push_warning("TerrainRGBLoader: %s %s not found" % [export_name, path])
 		return
 	if target.has_method("render_draped"):
-		print("CALLING RENDER DRAPED")
 		target.render_draped(self)
 
 
-## Applies `tex` (a ground/line texture rasterized directly from the parsed
-## vector tile data, see MVTTileRenderer._build_and_apply_ground_texture)
-## to every loaded terrain tile as a world-space-mapped overlay - purely so
-## that flat-texture approach can be visually compared side by side against
-## the existing draped 3D ground/line meshes, which keep rendering
-## unchanged on top of this. `bbox_min`/`bbox_size` are the world-space XZ
-## rectangle `tex` covers.
+## Applies `tex` as the BASE layer of every loaded terrain tile's ground
+## texture, world-space-mapped so the same material/uniforms work
+## regardless of each tile's own local offset. `bbox_min`/`bbox_size` are
+## the world-space XZ rectangle `tex` covers. See apply_overlay_texture()
+## for layering a smaller, higher-detail texture on top of this.
 func apply_ground_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2) -> void:
-	var shader_mat := ShaderMaterial.new()
-	shader_mat.shader = GROUND_TEXTURE_SHADER
-	shader_mat.set_shader_parameter("ground_texture", tex)
-	shader_mat.set_shader_parameter("bbox_min", bbox_min)
-	shader_mat.set_shader_parameter("bbox_size", bbox_size)
-	shader_mat.set_shader_parameter("base_color", BASE_GROUND_COLOR)
-	for mi in _terrain_meshes:
-		mi.material_override = shader_mat
+	var mat := _get_or_create_ground_shader_mat()
+	mat.set_shader_parameter("ground_texture", tex)
+	mat.set_shader_parameter("bbox_min", bbox_min)
+	mat.set_shader_parameter("bbox_size", bbox_size)
+
+
+## Applies `tex` as an OVERLAY layer, drawn on top of the base layer
+## (apply_ground_texture()) wherever `tex`'s own world-space bbox covers -
+## e.g. a small high-resolution satellite patch over a much larger low-
+## resolution background, without baking both into one texture at a single
+## shared resolution. Safe to call before apply_ground_texture(); the base
+## layer just shows base_color until that's applied too.
+func apply_overlay_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2) -> void:
+	var mat := _get_or_create_ground_shader_mat()
+	mat.set_shader_parameter("overlay_texture", tex)
+	mat.set_shader_parameter("overlay_bbox_min", bbox_min)
+	mat.set_shader_parameter("overlay_bbox_size", bbox_size)
+	mat.set_shader_parameter("overlay_enabled", true)
+
+
+## One shader material shared by every terrain mesh, created lazily on
+## first use - apply_ground_texture() and apply_overlay_texture() both
+## write into the SAME instance so either can be called first, and updates
+## from one are visible without disturbing whatever the other already set.
+func _get_or_create_ground_shader_mat() -> ShaderMaterial:
+	if _ground_shader_mat == null:
+		_ground_shader_mat = ShaderMaterial.new()
+		_ground_shader_mat.shader = GROUND_TEXTURE_SHADER
+		_ground_shader_mat.set_shader_parameter("base_color", BASE_GROUND_COLOR)
+		for mi in _terrain_meshes:
+			mi.material_override = _ground_shader_mat
+	return _ground_shader_mat
 
 
 ## Samples the decoded terrain elevation directly under `global_pos` (only

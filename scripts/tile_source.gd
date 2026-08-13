@@ -62,6 +62,18 @@ static func grid_coords(center_x: int, center_y: int, radius: int) -> Array:
 	return coords
 
 
+## Start (in tile-index units at whatever zoom `center` is expressed in) of
+## the 4-wide window centered on `center`, expanded so its edges land
+## exactly on (that zoom - 1) tile boundaries (2 tiles at this zoom = 1 tile
+## one zoom level coarser) - i.e. the smallest even integer <= center - 1.
+## Used to build a same-zoom ring around a higher-detail center that hands
+## off cleanly to a one-zoom-coarser ring around THAT, with no gap and no
+## double-covered area - see MVTTileRenderer's class doc comment (and
+## SatelliteTileLoader, which reuses the identical scheme one zoom level up).
+static func aligned_window_start(center: int) -> int:
+	return ((center - 1) / 2) * 2
+
+
 ## Standard Web Mercator "slippy map" tile (x,y) at zoom `z` containing
 ## (lat, lon), both in degrees. See
 ## https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames.

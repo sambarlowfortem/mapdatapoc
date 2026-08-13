@@ -5,11 +5,11 @@ extends Node3D
 
 ## Real-world coordinates (degrees) the scene should be centered on.
 ##fortem
-#var lat: float = 40.3471
-#var lon: float = -111.7582
+var lat: float = 40.3471
+var lon: float = -111.7582
 
-var lat: float = 47.7403
-var lon: float = -122.3385
+#var lat: float = 47.7403
+#var lon: float = -122.3385
 #47.7403,-122.3385
 ## TerrainRGBLoader and MVTTileRenderer nodes to position from lat/lon.
 ## Each keeps its own tile_z (desired zoom/detail level) as already
@@ -19,8 +19,19 @@ var lon: float = -122.3385
 @export var terrain_path: NodePath
 @export var tile_path: NodePath
 
+## Optional SatelliteTileLoader node - left empty, no satellite tiles are
+## positioned/loaded.
+@export var satellite_path: NodePath
+
 
 func _ready() -> void:
+	# Evict least-recently-used tiles if the on-disk cache (see TileCache)
+	# has grown past its size cap - done once here, up front, rather than
+	# after every individual tile write, since it has to walk the whole
+	# cache tree.
+	TileCache.enforce_size_cap()
+	print("TileCache: using ", TileCache.root_dir())
+
 	var terrain := get_node_or_null(terrain_path) as TerrainRGBLoader
 	var tile := get_node_or_null(tile_path) as MVTTileRenderer
 	if terrain == null:
@@ -40,9 +51,17 @@ func _ready() -> void:
 	tile.tile_y = vector_tile.y
 	tile.lat = lat
 
-	# terrain.start_loading() also triggers the vector tile (via
-	# vector_tile_path -> render_draped()) once the terrain grid is ready -
-	# see TerrainRGBLoader._start_vector_tile(). Awaited here (rather than
+	var satellite := get_node_or_null(satellite_path) as SatelliteTileLoader
+	if satellite != null:
+		var satellite_tile := TileSource.lat_lon_to_tile(lat, lon, satellite.tile_z)
+		satellite.tile_x = satellite_tile.x
+		satellite.tile_y = satellite_tile.y
+		satellite.lat = lat
+
+	# terrain.start_loading() also triggers the vector/satellite tile
+	# loaders (via vector_tile_path/satellite_tile_path -> render_draped())
+	# once the terrain grid is ready - see
+	# TerrainRGBLoader._trigger_draped_renderer(). Awaited here (rather than
 	# fired-and-forgotten) so the marker below can sample ground elevation
 	# once the terrain tiles it needs have actually loaded.
 	await terrain.start_loading()

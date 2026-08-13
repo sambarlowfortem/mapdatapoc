@@ -14,7 +14,7 @@
 ## fetched as part of the tile_z ring below (from url_template).
 ##
 ## The tile_z ring (url_template) is a 4x4 window of tile_z tiles - not
-## just the 8 immediate neighbors - expanded (see _aligned_window_start())
+## just the 8 immediate neighbors - expanded (see TileSource.aligned_window_start())
 ## so its edges land exactly on tile_z-1 tile boundaries (2 tile_z tiles =
 ## 1 tile_z-1 tile). That's what lets the tile_z-1 ring below start exactly
 ## where this one ends, with no gap and no double-covered area - unlike a
@@ -87,6 +87,14 @@ class_name MVTTileRenderer
 ## at the footprint's own corners (see _add_building) and terrain can still
 ## dip lower somewhere between those corners.
 @export var building_foundation_depth: float = 20.0
+
+## Experiment toggle: when false, landcover/landuse/water/road/waterway
+## features are still parsed (buildings need the same .pbf tiles) but never
+## turned into the baked ground texture - only buildings render. Used to A/B
+## the vector-drawn ground against a satellite-imagery ground (see
+## SatelliteTileLoader) without the two competing for the same terrain
+## material at once.
+var render_ground_and_lines: bool = false
 
 const GEOM_POINT := MVTParser.GEOM_POINT
 const GEOM_LINESTRING := MVTParser.GEOM_LINESTRING
@@ -178,9 +186,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 		var fetched := []
 		var all_ok := true
 		for c in children:
-			var url := TileSource.url_for(high_detail_url_template, child_z, c.x, c.y)
-			print("SENDING REQUEST TO ", url)
-			var data: PackedByteArray = await _http_get(url)
+			var data: PackedByteArray = await _cached_get(high_detail_url_template, child_z, c.x, c.y)
 			if data.is_empty():
 				push_warning("MVTTileRenderer: high-detail source unreachable, falling back to url_template for the center tile")
 				all_ok = false
@@ -198,15 +204,16 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 					continue
 				var world_offset := TileSource.world_offset(child_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
 				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
-				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
+				if render_ground_and_lines:
+					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
 				loaded += 1
 
 	# 4x4 window of tile_z tiles, aligned to tile_z-1 tile boundaries (2
 	# tile_z tiles = 1 tile_z-1 tile) so the tile_z ring and tile_z-1 ring
 	# below hand off with no gap and no overlap - see the class doc comment
-	# and _aligned_window_start().
-	var z14_x0 := _aligned_window_start(tile_x)
-	var z14_y0 := _aligned_window_start(tile_y)
+	# and TileSource.aligned_window_start().
+	var z14_x0 := TileSource.aligned_window_start(tile_x)
+	var z14_y0 := TileSource.aligned_window_start(tile_y)
 
 	# tile_z ring: every tile in the aligned 4x4 window - this is what
 	# actually surrounds the high-detail center edge-to-edge. Center tile
@@ -220,9 +227,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				if cx == tile_x and cy == tile_y and used_high_detail:
 					continue  # already covered by the 4 high-detail tiles above
 				total += 1
-				var url := TileSource.url_for(url_template, tile_z, cx, cy)
-				print("SENDING REQUEST TO ", url)
-				var data: PackedByteArray = await _http_get(url)
+				var data: PackedByteArray = await _cached_get(url_template, tile_z, cx, cy)
 				if data.is_empty():
 					continue
 				var layers := MVTParser.parse_tile(data)
@@ -230,7 +235,8 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 					continue
 				var world_offset := TileSource.world_offset(tile_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
 				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
-				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
+				if render_ground_and_lines:
+					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
 				loaded += 1
 	elif not used_high_detail:
 		push_warning("MVTTileRenderer: high-detail source failed and no fallback url_template set")
@@ -250,9 +256,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				var cx := z13_x0 + dx
 				var cy := z13_y0 + dy
 				total += 1
-				var url := TileSource.url_for(outer_url_template, outer_z, cx, cy)
-				print("SENDING REQUEST TO ", url)
-				var data: PackedByteArray = await _http_get(url)
+				var data: PackedByteArray = await _cached_get(outer_url_template, outer_z, cx, cy)
 				if data.is_empty():
 					continue
 				var layers := MVTParser.parse_tile(data)
@@ -260,7 +264,8 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 					continue
 				var world_offset := TileSource.world_offset(outer_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
 				outer_counts += _render_buildings(layers, terrain, world_offset, st_outer_buildings)
-				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
+				if render_ground_and_lines:
+					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
 				loaded += 1
 
 	print("MVTTileRenderer: loaded %d/%d tiles (center %s)" % [loaded, total, "high-detail" if used_high_detail else "fallback"])
@@ -272,8 +277,27 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 	# (parsed vector data, flat, no elevation), not from any 3D geometry.
 	# See _build_and_apply_ground_texture. Covers the same inner+outer
 	# footprint as the buildings meshes above; buildings themselves are
-	# excluded from the texture (they stay 3D-only).
-	await _build_and_apply_ground_texture(ground_tris, line_quads, terrain)
+	# excluded from the texture (they stay 3D-only). Skipped entirely when
+	# render_ground_and_lines is off - ground_tris/line_quads are empty in
+	# that case anyway, but this also avoids overwriting whatever ground
+	# texture (e.g. SatelliteTileLoader's) is already applied to `terrain`.
+	if render_ground_and_lines:
+		await _build_and_apply_ground_texture(ground_tris, line_quads, terrain)
+
+
+## Returns tile (z,x,y) from `template`'s on-disk cache (see TileCache) if
+## present, otherwise fetches it live and writes it to the cache on success.
+func _cached_get(template: String, z: int, x: int, y: int) -> PackedByteArray:
+	var cache_path := TileCache.path_for(template, z, x, y)
+	var cached := TileCache.read(cache_path)
+	if not cached.is_empty():
+		return cached
+	var url := TileSource.url_for(template, z, x, y)
+	print("SENDING REQUEST TO ", url)
+	var data := await _http_get(url)
+	if not data.is_empty():
+		TileCache.write(cache_path, data)
+	return data
 
 
 ## Fetches `url` and returns the raw response body, or an empty array on any
@@ -300,15 +324,6 @@ func _http_get(url: String) -> PackedByteArray:
 		push_error("MVTTileRenderer: request to %s failed (result %d, code %d)" % [url, http_result, response_code])
 		return PackedByteArray()
 	return body
-
-
-## Start (in tile_z units) of the 4-wide window of tile_z tiles, centered
-## on `center`, once expanded so its edges land exactly on tile_z-1 tile
-## boundaries (2 tile_z tiles = 1 tile_z-1 tile) - i.e. the smallest even
-## integer <= center - 1. See the class doc comment for why this alignment
-## matters.
-static func _aligned_window_start(center: int) -> int:
-	return ((center - 1) / 2) * 2
 
 
 func _to_world(p: Vector2, extent: int) -> Vector2:
