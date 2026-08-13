@@ -170,13 +170,18 @@ func apply_ground_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2)
 ## e.g. a small high-resolution satellite patch over a much larger low-
 ## resolution background, without baking both into one texture at a single
 ## shared resolution. Safe to call before apply_ground_texture(); the base
-## layer just shows base_color until that's applied too.
-func apply_overlay_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2) -> void:
+## layer just shows base_color until that's applied too. `tint` multiplies
+## the overlay's own color only (not the base layer) - lets a color
+## mismatch between the base and overlay sources' imagery providers be
+## dialed out so their shared seam is less obvious; (1,1,1) leaves it
+## unchanged.
+func apply_overlay_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2, tint: Color = Color.WHITE) -> void:
 	var mat := _get_or_create_ground_shader_mat()
 	mat.set_shader_parameter("overlay_texture", tex)
 	mat.set_shader_parameter("overlay_bbox_min", bbox_min)
 	mat.set_shader_parameter("overlay_bbox_size", bbox_size)
 	mat.set_shader_parameter("overlay_enabled", true)
+	mat.set_shader_parameter("overlay_tint", Vector3(tint.r, tint.g, tint.b))
 
 
 ## One shader material shared by every terrain mesh, created lazily on

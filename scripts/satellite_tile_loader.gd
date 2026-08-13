@@ -88,6 +88,14 @@ class_name SatelliteTileLoader
 ## be.
 @export var overlay_meters_per_pixel: float = 1.5
 
+## Multiplicative color correction applied to the overlay layer only, not
+## the base - base_url_template and overlay_url_template often come from
+## different imagery providers with different color grading, so the seam
+## between them can look like an obvious color jump even when the imagery
+## itself lines up pixel-perfect. Tune this in the editor while looking at
+## the seam; (1,1,1) (white) leaves the overlay unchanged.
+@export var overlay_tint: Color = Color(1.0, 1.0, 1.0)
+
 ## Target texel density (meters/pixel) for the base mosaic - much coarser
 ## than the overlay by default since it covers the whole terrain grid (a
 ## much larger area) from a source that's already low-res.
@@ -222,7 +230,7 @@ func _load_overlay_pyramid(terrain: TerrainRGBLoader, specs: Array) -> void:
 		return
 	var tex := await _composite(fetched["entries"], fetched["bounds"], overlay_meters_per_pixel)
 	if tex != null:
-		terrain.apply_overlay_texture(tex, fetched["bounds"].position, fetched["bounds"].size)
+		terrain.apply_overlay_texture(tex, fetched["bounds"].position, fetched["bounds"].size, overlay_tint)
 
 
 ## Fetches 4 tiles at tile_z-2 from overlay_fallback_url_template, chosen so
@@ -261,6 +269,9 @@ func _load_overlay_fallback(terrain: TerrainRGBLoader) -> void:
 		return
 	var tex := await _composite(fetched["entries"], fetched["bounds"], overlay_meters_per_pixel)
 	if tex != null:
+		# No overlay_tint here (unlike _load_overlay_pyramid) - the fallback
+		# source is meant to be the same local-server family as base_url_template,
+		# not the API, so it shouldn't need the API-vs-local color correction.
 		terrain.apply_overlay_texture(tex, fetched["bounds"].position, fetched["bounds"].size)
 
 

@@ -20,6 +20,12 @@ uniform sampler2D overlay_texture : source_color;
 uniform vec2 overlay_bbox_min;
 uniform vec2 overlay_bbox_size;
 uniform bool overlay_enabled = false;
+// Multiplicative color correction applied to the overlay layer ONLY - the
+// base and overlay layers often come from different imagery providers with
+// different color grading, so their shared seam can look like an obvious
+// color jump even when the imagery itself lines up pixel-perfect. (1,1,1)
+// (white) leaves the overlay unchanged - see SatelliteTileLoader.overlay_tint.
+uniform vec3 overlay_tint : source_color = vec3(1.0);
 
 varying vec2 world_xz;
 
@@ -40,7 +46,7 @@ void fragment() {
 		vec2 ouv = (world_xz - overlay_bbox_min) / overlay_bbox_size;
 		if (ouv.x >= 0.0 && ouv.x <= 1.0 && ouv.y >= 0.0 && ouv.y <= 1.0) {
 			vec4 overlay_color = texture(overlay_texture, ouv);
-			ALBEDO = mix(ALBEDO, overlay_color.rgb, overlay_color.a);
+			ALBEDO = mix(ALBEDO, overlay_color.rgb * overlay_tint, overlay_color.a);
 		}
 	}
 }
