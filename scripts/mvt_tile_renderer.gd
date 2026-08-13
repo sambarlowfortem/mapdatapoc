@@ -1,30 +1,35 @@
-## Fetches .pbf (Mapbox Vector Tile) tiles over HTTP covering (tile_z,
-## tile_x, tile_y)'s footprint plus its 8 same-zoom neighbors, plus a third
-## "outer" ring one zoom level coarser, and builds simple 3D meshes for them:
-## colored ground layers, ribbon roads/waterways, and extruded buildings, all
-## draped onto a terrain surface rather than sitting flat.
+## Fetches .pbf (Mapbox Vector Tile) tiles over HTTP in three concentric,
+## NON-overlapping rings of increasing zoom (= detail) toward the center: a
+## 2x2 block of tiles at tile_z+1 in the middle, a ring of tiles at tile_z
+## around that, and a ring of tiles at tile_z-1 around that. Ground
+## (landcover/landuse/water) and lines (roads/waterways) are rasterized
+## directly from the parsed vector data into a texture applied to the
+## terrain surface (see _build_and_apply_ground_texture /
+## TerrainRGBLoader.apply_ground_texture) rather than built as 3D geometry -
+## only buildings are extruded 3D meshes, draped onto the terrain surface.
 ##
-## The center tile prefers 4 higher-detail children (tile_z+1) from
-## high_detail_url_template; if that source can't be reached, it falls back
-## to the single tile_z/tile_x/tile_y tile from url_template instead. The 8
-## surrounding tiles always come from url_template at tile_z, positioned
-## edge-to-edge around whichever version of the center ended up loading.
+## The center 2x2 block (tile_z+1, from high_detail_url_template) covers
+## exactly the footprint of the single tile_z tile containing (tile_x,
+## tile_y). If that source can't be reached, the center tile is instead
+## fetched as part of the tile_z ring below (from url_template).
 ##
-## The outer ring (outer_url_template, at tile_z-1) is a 3x3 grid of tiles
-## one zoom level coarser, centered on the tile_z-1 PARENT of the center
-## tile. A coarser 3x3 ring never lines up evenly with the finer 3x3 grid
-## inside it (3 tiles at one zoom covers 1.5 tiles' worth at the zoom one
-## level coarser, not a whole number), so rather than try to compute and
-## exclude the exact overlapping region, the outer ring is simply fetched
-## and rendered in full - including the part that's geographically
-## redundant with the finer tiles - and rendered at a lower render_priority
-## (see _finalize_mesh) so the finer tiles always visually win wherever they
-## overlap. The overlap costs some wasted fetch/render work; it avoids
-## needing exact tile-boundary geometry clipping.
+## The tile_z ring (url_template) is a 4x4 window of tile_z tiles - not
+## just the 8 immediate neighbors - expanded (see _aligned_window_start())
+## so its edges land exactly on tile_z-1 tile boundaries (2 tile_z tiles =
+## 1 tile_z-1 tile). That's what lets the tile_z-1 ring below start exactly
+## where this one ends, with no gap and no double-covered area - unlike a
+## plain 3x3 window, which straddles tile_z-1 boundaries unevenly (3 tiles
+## covers 1.5 tiles' worth one zoom level coarser) and would otherwise force
+## a choice between a gap or fetching/rendering the same ground twice at two
+## different zoom levels (which used to happen here - duplicate buildings
+## in the overlap band, among other things).
 ##
-## Each of the three rings is merged into its own three meshes (ground/
-## lines/buildings) - six total, not three - so the outer ring can have its
-## own (lower) render priority tier independent of the inner rings. No true
+## The tile_z-1 ring (outer_url_template) is the 12 tiles forming a
+## one-tile-wide ring around the 2x2 tile_z-1 block the tile_z window above
+## exactly covers.
+##
+## Each ring gets its own buildings mesh (Buildings / OuterBuildings), so
+## material/priority could differ per ring if ever needed. No true
 ## streaming yet - it all loads once, up front.
 ##
 ## This node does NOT fetch/render on its own - rendering needs a terrain to
@@ -48,10 +53,10 @@ class_name MVTTileRenderer
 ## was used).
 @export var url_template: String = ""
 
-## Outer ring source - a 3x3 grid of tiles at tile_z-1 (one zoom level
-## coarser), centered on the tile_z-1 parent of (tile_x, tile_y). Left
-## empty, no outer ring is loaded. See the class doc comment for why this
-## overlaps the inner tiles instead of being clipped to exclude them.
+## Outer ring source - a one-tile-wide ring of tiles at tile_z-1 (one zoom
+## level coarser), around the tile_z-1 footprint the tile_z ring exactly
+## covers. Left empty, no outer ring is loaded. See the class doc comment
+## for the exact (non-overlapping) tiling scheme.
 @export var outer_url_template: String = ""
 
 ## Zoom/x/y of the tile this node covers. high_detail_url_template (if set)
@@ -60,6 +65,12 @@ class_name MVTTileRenderer
 @export var tile_z: int = 13
 @export var tile_x: int = 0
 @export var tile_y: int = 0
+
+## Real-world latitude (degrees) this tile grid is centered on - set by
+## main.gd alongside tile_x/tile_y, and should match the sibling
+## TerrainRGBLoader's lat. Needed to correct Web Mercator's latitude-
+## dependent scale distortion, see TileSource.ground_scale().
+@export var lat: float = 0.0
 
 ## Fallback building height (meters) when a feature has no render_height.
 @export var default_building_height: float = 8.0
@@ -72,9 +83,9 @@ class_name MVTTileRenderer
 
 ## How far (meters) building walls extend below their sampled base
 ## elevation - a foundation "skirt" so there's never a visible gap under a
-## building on sloped terrain, since base_y is sampled once at the
-## footprint's centroid (see _add_building) and terrain can dip below that
-## single sample anywhere else under the footprint.
+## building on sloped terrain, since base_y is the minimum of samples taken
+## at the footprint's own corners (see _add_building) and terrain can still
+## dip lower somewhere between those corners.
 @export var building_foundation_depth: float = 20.0
 
 const GEOM_POINT := MVTParser.GEOM_POINT
@@ -117,37 +128,37 @@ var tile_size_meters: float = 0.0
 
 
 
-## Builds this node's meshes, sampling `terrain`'s elevation at every vertex
-## so ground/roads/buildings all rest on the terrain surface underneath them
-## instead of floating at a flat y. See the class doc comment for the
+## Builds this node's buildings meshes (sampling `terrain`'s elevation at
+## each building's centroid so they rest on the terrain surface instead of
+## floating at a flat y) and the baked ground/line texture applied to
+## `terrain` itself. See the class doc comment for the
 ## center/surroundings/fallback strategy.
 func render_draped(terrain: TerrainRGBLoader) -> void:
 	if high_detail_url_template == "" and url_template == "":
 		push_warning("MVTTileRenderer: no high_detail_url_template or url_template set")
 		return
 
-	var st_ground := SurfaceTool.new()
-	st_ground.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var st_lines := SurfaceTool.new()
-	st_lines.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var st_buildings := SurfaceTool.new()
 	st_buildings.begin(Mesh.PRIMITIVE_TRIANGLES)
 	# Flat-shade buildings: see the note on _finalize_mesh's caller below.
 	st_buildings.set_smooth_group(-1)
 
-	var st_outer_ground := SurfaceTool.new()
-	st_outer_ground.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var st_outer_lines := SurfaceTool.new()
-	st_outer_lines.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var st_outer_buildings := SurfaceTool.new()
 	st_outer_buildings.begin(Mesh.PRIMITIVE_TRIANGLES)
 	st_outer_buildings.set_smooth_group(-1)
 
-	var counts := Vector3i.ZERO  # x=ground, y=lines, z=buildings vertex counts
-	var outer_counts := Vector3i.ZERO
+	var counts := 0  # buildings vertex count
+	var outer_counts := 0
 	var loaded := 0
 	var total := 0
 	var used_high_detail := false
+
+	# Flat (no elevation) ground/line geometry for the baked ground texture
+	# - collected from both the inner and outer rings (same coverage as the
+	# Buildings/OuterBuildings meshes below), entirely independent of
+	# terrain. See _build_and_apply_ground_texture.
+	var ground_tris := []
+	var line_quads := []
 
 	# Center: 4 higher-detail children at tile_z+1, from high_detail_url_template.
 	if high_detail_url_template != "":
@@ -171,7 +182,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 			fetched.append([c, data])
 		if all_ok:
 			used_high_detail = true
-			tile_size_meters = TileSource.size_meters(child_z)
+			tile_size_meters = TileSource.size_meters(child_z, lat)
 			total += fetched.size()
 			for entry in fetched:
 				var c: Vector2i = entry[0]
@@ -179,67 +190,84 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				var layers := MVTParser.parse_tile(data)
 				if layers.is_empty():
 					continue
-				var world_offset := TileSource.world_offset(child_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y)
-				counts += _render_layers(layers, terrain, world_offset, st_ground, st_lines, st_buildings)
+				var world_offset := TileSource.world_offset(child_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
+				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
 				loaded += 1
 
-	# Center fallback (only if high-detail didn't come through) plus the 8
-	# same-zoom neighbors (always) - all at tile_z, from url_template. This
-	# is what actually surrounds the high-detail center edge-to-edge, and
-	# it's also the full 3x3 grid on its own if high-detail wasn't used.
+	# 4x4 window of tile_z tiles, aligned to tile_z-1 tile boundaries (2
+	# tile_z tiles = 1 tile_z-1 tile) so the tile_z ring and tile_z-1 ring
+	# below hand off with no gap and no overlap - see the class doc comment
+	# and _aligned_window_start().
+	var z14_x0 := _aligned_window_start(tile_x)
+	var z14_y0 := _aligned_window_start(tile_y)
+
+	# tile_z ring: every tile in the aligned 4x4 window - this is what
+	# actually surrounds the high-detail center edge-to-edge. Center tile
+	# is skipped when the 4 high-detail children already cover it.
 	if url_template != "":
-		tile_size_meters = TileSource.size_meters(tile_z)
-		var center := Vector2i(tile_x, tile_y)
-		for c in TileSource.grid_coords(tile_x, tile_y, 1):
-			if c == center and used_high_detail:
-				continue  # already covered by the 4 high-detail tiles above
-			total += 1
-			var url := TileSource.url_for(url_template, tile_z, c.x, c.y)
-			print("SENDING REQUEST TO ", url)
-			var data: PackedByteArray = await _http_get(url)
-			if data.is_empty():
-				continue
-			var layers := MVTParser.parse_tile(data)
-			if layers.is_empty():
-				continue
-			var world_offset := TileSource.world_offset(tile_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y)
-			counts += _render_layers(layers, terrain, world_offset, st_ground, st_lines, st_buildings)
-			loaded += 1
+		tile_size_meters = TileSource.size_meters(tile_z, lat)
+		for dy in range(4):
+			for dx in range(4):
+				var cx := z14_x0 + dx
+				var cy := z14_y0 + dy
+				if cx == tile_x and cy == tile_y and used_high_detail:
+					continue  # already covered by the 4 high-detail tiles above
+				total += 1
+				var url := TileSource.url_for(url_template, tile_z, cx, cy)
+				print("SENDING REQUEST TO ", url)
+				var data: PackedByteArray = await _http_get(url)
+				if data.is_empty():
+					continue
+				var layers := MVTParser.parse_tile(data)
+				if layers.is_empty():
+					continue
+				var world_offset := TileSource.world_offset(tile_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
+				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
+				loaded += 1
 	elif not used_high_detail:
 		push_warning("MVTTileRenderer: high-detail source failed and no fallback url_template set")
 
-	# Outer ring: 3x3 grid one zoom level coarser, centered on the tile_z-1
-	# parent of the center tile. Fetched and rendered in full, overlap with
-	# the inner tiles and all - see the class doc comment for why - but kept
-	# in its own meshes/materials so it can sit at a lower render_priority
-	# and always lose to the inner tiles wherever they overlap.
+	# Outer ring: the 12 tiles forming a one-tile-wide ring around the 2x2
+	# tile_z-1 block the tile_z window above exactly covers - picking up
+	# precisely where that window stops, with no overlap and no gap.
 	if outer_url_template != "":
 		var outer_z := tile_z - 1
-		var outer_center := Vector2i(tile_x / 2, tile_y / 2)
-		tile_size_meters = TileSource.size_meters(outer_z)
-		for c in TileSource.grid_coords(outer_center.x, outer_center.y, 1):
-			total += 1
-			var url := TileSource.url_for(outer_url_template, outer_z, c.x, c.y)
-			print("SENDING REQUEST TO ", url)
-			var data: PackedByteArray = await _http_get(url)
-			if data.is_empty():
-				continue
-			var layers := MVTParser.parse_tile(data)
-			if layers.is_empty():
-				continue
-			var world_offset := TileSource.world_offset(outer_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y)
-			outer_counts += _render_layers(layers, terrain, world_offset, st_outer_ground, st_outer_lines, st_outer_buildings)
-			loaded += 1
+		var z13_x0 := z14_x0 / 2
+		var z13_y0 := z14_y0 / 2
+		tile_size_meters = TileSource.size_meters(outer_z, lat)
+		for dy in range(-1, 3):
+			for dx in range(-1, 3):
+				if dx >= 0 and dx <= 1 and dy >= 0 and dy <= 1:
+					continue  # inner 2x2 - already covered by the tile_z window above
+				var cx := z13_x0 + dx
+				var cy := z13_y0 + dy
+				total += 1
+				var url := TileSource.url_for(outer_url_template, outer_z, cx, cy)
+				print("SENDING REQUEST TO ", url)
+				var data: PackedByteArray = await _http_get(url)
+				if data.is_empty():
+					continue
+				var layers := MVTParser.parse_tile(data)
+				if layers.is_empty():
+					continue
+				var world_offset := TileSource.world_offset(outer_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				outer_counts += _render_buildings(layers, terrain, world_offset, st_outer_buildings)
+				_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
+				loaded += 1
 
 	print("MVTTileRenderer: loaded %d/%d tiles (center %s)" % [loaded, total, "high-detail" if used_high_detail else "fallback"])
 
-	_finalize_mesh(st_ground, "GroundLayers", counts.x, 0, false)
-	_finalize_mesh(st_lines, "Lines", counts.y, 0, false)
-	_finalize_mesh(st_buildings, "Buildings", counts.z, 0, false, BaseMaterial3D.CULL_BACK)
+	_finalize_mesh(st_buildings, "Buildings", counts, 0, false, BaseMaterial3D.CULL_BACK)
+	_finalize_mesh(st_outer_buildings, "OuterBuildings", outer_counts, 0, false, BaseMaterial3D.CULL_BACK)
 
-	_finalize_mesh(st_outer_ground, "OuterGroundLayers", outer_counts.x, 0, false)
-	_finalize_mesh(st_outer_lines, "OuterLines", outer_counts.y, 0, false)
-	_finalize_mesh(st_outer_buildings, "OuterBuildings", outer_counts.z, 0, false, BaseMaterial3D.CULL_BACK)
+	# Baked ground texture - built directly from ground_tris/line_quads
+	# (parsed vector data, flat, no elevation), not from any 3D geometry.
+	# See _build_and_apply_ground_texture. Covers the same inner+outer
+	# footprint as the buildings meshes above; buildings themselves are
+	# excluded from the texture (they stay 3D-only).
+	await _build_and_apply_ground_texture(ground_tris, line_quads, terrain)
 
 
 ## Fetches `url` and returns the raw response body, or an empty array on any
@@ -268,6 +296,15 @@ func _http_get(url: String) -> PackedByteArray:
 	return body
 
 
+## Start (in tile_z units) of the 4-wide window of tile_z tiles, centered
+## on `center`, once expanded so its edges land exactly on tile_z-1 tile
+## boundaries (2 tile_z tiles = 1 tile_z-1 tile) - i.e. the smallest even
+## integer <= center - 1. See the class doc comment for why this alignment
+## matters.
+static func _aligned_window_start(center: int) -> int:
+	return ((center - 1) / 2) * 2
+
+
 func _to_world(p: Vector2, extent: int) -> Vector2:
 	# Map tile-local [0, extent] -> meters, relative to THIS tile's own
 	# center - grid placement (world_offset) is added separately by callers.
@@ -279,22 +316,58 @@ func _to_world(p: Vector2, extent: int) -> Vector2:
 	return Vector2(wx, wz)
 
 
-## Terrain elevation at world position (x, z), plus a small per-layer offset
-## to keep layers from z-fighting each other, plus the overall
-## drape_height_offset.
-func _terrain_y(terrain: TerrainRGBLoader, x: float, z: float, offset: float) -> float:
-	return terrain.get_elevation_at_global(to_global(Vector3(x, 0.0, z))) + offset + drape_height_offset
+## Terrain elevation at world position (x, z), plus drape_height_offset.
+func _terrain_y(terrain: TerrainRGBLoader, x: float, z: float) -> float:
+	return terrain.get_elevation_at_global(to_global(Vector3(x, 0.0, z))) + drape_height_offset
 
 
-static func _ensure_ccw(ring: PackedVector2Array) -> PackedVector2Array:
+static func _signed_area(ring: PackedVector2Array) -> float:
 	var area := 0.0
 	for i in range(ring.size()):
 		var a: Vector2 = ring[i]
 		var b: Vector2 = ring[(i + 1) % ring.size()]
 		area += (a.x * b.y - b.x * a.y)
-	if area < 0.0:
+	return area
+
+
+static func _ensure_ccw(ring: PackedVector2Array) -> PackedVector2Array:
+	if _signed_area(ring) < 0.0:
 		ring.reverse()
 	return ring
+
+
+## An MVT polygon feature's `rings` isn't necessarily one polygon - it can
+## be a MultiPolygon, encoding several disconnected footprints (e.g. a whole
+## row of townhomes, or an apartment complex's separate wings) as one
+## feature. The spec's own convention is what makes them distinguishable at
+## all: every exterior ring shares one winding direction, and every hole
+## shares the opposite one, however many separate exterior rings there are.
+## This walks the RAW (pre-_ensure_ccw - winding still means something)
+## rings in order and starts a new sub-polygon each time a ring's winding
+## matches the first ring's, treating any opposite-wound ring as a hole of
+## whichever sub-polygon it immediately follows. Returns Array[Array] - one
+## inner Array per sub-polygon, each already in the [outer, hole, hole...]
+## shape _add_building/_add_polygon_flat expect.
+##
+## Getting this right matters: before this split existed, a building
+## function was handed the whole multi-hundred-ring feature at once and
+## sampled ONE elevation from just the first ring, then reused that single
+## value for every other ring's walls - so a feature bundling hundreds of
+## real buildings scattered across a tile rendered them all at whichever
+## one building's elevation happened to be first, regardless of how far the
+## rest actually were from it.
+static func _split_into_polygons(rings: Array) -> Array:
+	var polygons: Array = []
+	if rings.is_empty():
+		return polygons
+	var exterior_positive := _signed_area(rings[0]) >= 0.0
+	for ring in rings:
+		var is_exterior := (_signed_area(ring) >= 0.0) == exterior_positive
+		if polygons.is_empty() or is_exterior:
+			polygons.append([ring])
+		else:
+			polygons[polygons.size() - 1].append(ring)
+	return polygons
 
 
 func _world_ring(ring: PackedVector2Array, extent: int) -> PackedVector2Array:
@@ -334,47 +407,30 @@ func _add_polygon_flat(st: SurfaceTool, rings: Array, extent: int, color: Color,
 	return count
 
 
-## Same as _add_polygon_flat, but each vertex samples the terrain under it
-## (plus `offset`) instead of using one fixed y - so the polygon follows the
-## ground's contour instead of slicing through it on sloped terrain.
-func _add_polygon_draped(st: SurfaceTool, rings: Array, extent: int, color: Color, terrain: TerrainRGBLoader, offset: float, world_offset: Vector2) -> int:
-	var count := 0
-	for ring in rings:
-		if ring.size() < 3:
-			continue
-		var world_ring := _world_ring(ring, extent)
-		if world_ring.size() < 3:
-			continue
-		var indices := Geometry2D.triangulate_polygon(world_ring)
-		if indices.size() == 0:
-			continue
-		for i in range(0, indices.size(), 3):
-			var a: Vector2 = world_ring[indices[i]] + world_offset
-			var b: Vector2 = world_ring[indices[i + 1]] + world_offset
-			var c: Vector2 = world_ring[indices[i + 2]] + world_offset
-			st.set_color(color)
-			st.add_vertex(Vector3(a.x, _terrain_y(terrain, a.x, a.y, offset), a.y))
-			st.set_color(color)
-			st.add_vertex(Vector3(b.x, _terrain_y(terrain, b.x, b.y, offset), b.y))
-			st.set_color(color)
-			st.add_vertex(Vector3(c.x, _terrain_y(terrain, c.x, c.y, offset), c.y))
-			count += 3
-	return count
-
-
-## Buildings sit on a single base elevation sampled at their footprint's
-## centroid (not per-vertex) so walls stay vertical and roofs stay flat -
-## reasonable for a building-sized footprint, unlike the larger ground layers.
+## Buildings sit on a single base elevation - the MINIMUM terrain elevation
+## sampled across the footprint's own corners (not a centroid average) -
+## so walls stay vertical and roofs stay flat. Using the minimum guarantees
+## the roof is always at least `height` above the lowest point terrain
+## actually touches under the building: a centroid average can land well
+## below the footprint's real corners on steep terrain (Seattle-hilly, not
+## just gently sloped), which let base_y + height end up below the
+## surrounding ground everywhere - the whole building buried, not just its
+## foundation skirt showing a gap. The tradeoff is the reverse of that on
+## sloped lots - the foundation now visibly buries deeper on the uphill
+## side of a footprint - which is a far less objectionable artifact than a
+## building floating or vanishing outright.
+#var one_building: bool = false
 func _add_building(st: SurfaceTool, rings: Array, extent: int, height: float, color: Color, terrain: TerrainRGBLoader, world_offset: Vector2) -> int:
+	#print("Adding Building: st: ", st, " rings: ", rings, " extent: ", extent, " height ", height, " color: ", color, " terrain ", terrain, " world offset ", world_offset)
+	#print("Adding Building: st: ", st, " extent: ", extent, " height ", height, " color: ", color, " terrain ", terrain, " world offset ", world_offset)
+
 	var base_y := 0.0
 	if rings.size() > 0:
 		var outer := _world_ring(rings[0], extent)
 		if outer.size() > 0:
-			var centroid := Vector2.ZERO
+			base_y = _terrain_y(terrain, outer[0].x + world_offset.x, outer[0].y + world_offset.y)
 			for p in outer:
-				centroid += p
-			centroid = centroid / outer.size() + world_offset
-			base_y = _terrain_y(terrain, centroid.x, centroid.y, 0.0)
+				base_y = min(base_y, _terrain_y(terrain, p.x + world_offset.x, p.y + world_offset.y))
 	var count := _add_polygon_flat(st, rings, extent, color, base_y + height, world_offset)  # roof
 	var wall_color := color.darkened(0.2)
 	for ring in rings:
@@ -385,6 +441,7 @@ func _add_building(st: SurfaceTool, rings: Array, extent: int, height: float, co
 		if n < 2:
 			continue
 		for i in range(n):
+			#print("Looping another ring with base_y ", base_y)
 			var a: Vector2 = world_ring[i] + world_offset
 			var b: Vector2 = world_ring[(i + 1) % n] + world_offset
 			var a0 := Vector3(a.x, base_y - building_foundation_depth, a.y)
@@ -401,8 +458,99 @@ func _add_building(st: SurfaceTool, rings: Array, extent: int, height: float, co
 	return count
 
 
-func _add_line(st: SurfaceTool, rings: Array, extent: int, width: float, color: Color, terrain: TerrainRGBLoader, offset: float, world_offset: Vector2) -> int:
-	var count := 0
+## Buildings use normal depth testing against the terrain (and each other),
+## plus CULL_BACK instead of the default CULL_DISABLED so their own
+## back/interior faces don't compete with front faces for the same pixels -
+## ordinary convex building footprints render correctly with backface
+## culling alone.
+func _finalize_mesh(st: SurfaceTool, node_name: String, vertex_count: int, render_priority: int = 0, no_depth_test: bool = true, cull_mode: BaseMaterial3D.CullMode = BaseMaterial3D.CULL_DISABLED) -> void:
+	if vertex_count == 0:
+		return
+	st.generate_normals()
+	var mesh := st.commit()
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.name = node_name
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true
+	mat.cull_mode = cull_mode
+	mat.no_depth_test = no_depth_test
+	mat.render_priority = render_priority
+	mi.material_override = mat
+	add_child(mi)
+
+
+## Collects `layers`' ground (landcover/landuse/water) and line
+## (transportation/waterway) features as flat, pre-triangulated world-space
+## shapes with no elevation involved at all - used to build the baked
+## ground texture (_build_and_apply_ground_texture) directly from the
+## parsed vector data. Buildings are excluded on purpose - they stay
+## 3D-only, see _render_buildings.
+func _collect_flat_layers(layers: Dictionary, world_offset: Vector2, ground_tris: Array, line_quads: Array) -> void:
+	for lname in ["landcover", "landuse"]:
+		if not layers.has(lname):
+			continue
+		var extent: int = layers[lname]["extent"]
+		var base_color: Color = LAYER_COLORS.get(lname, Color(0.5, 0.5, 0.5))
+		for feat in layers[lname]["features"]:
+			if feat["type"] != GEOM_POLYGON:
+				continue
+			var col := base_color
+			if lname == "landuse" and feat["props"].has("class"):
+				col = LANDUSE_CLASS_COLORS.get(feat["props"]["class"], base_color)
+			_collect_flat_polygon(ground_tris, feat["rings"], extent, col, world_offset)
+	if layers.has("water"):
+		var extent: int = layers["water"]["extent"]
+		for feat in layers["water"]["features"]:
+			if feat["type"] == GEOM_POLYGON:
+				_collect_flat_polygon(ground_tris, feat["rings"], extent, LAYER_COLORS["water"], world_offset)
+
+	if layers.has("transportation"):
+		var extent: int = layers["transportation"]["extent"]
+		for feat in layers["transportation"]["features"]:
+			if feat["type"] != GEOM_LINESTRING:
+				continue
+			var cls: String = feat["props"].get("class", "minor")
+			var style = ROAD_STYLE.get(cls, ROAD_STYLE_DEFAULT)
+			_collect_flat_line(line_quads, feat["rings"], extent, style["width"], style["color"], world_offset)
+	if layers.has("waterway"):
+		var extent: int = layers["waterway"]["extent"]
+		for feat in layers["waterway"]["features"]:
+			if feat["type"] == GEOM_LINESTRING:
+				_collect_flat_line(line_quads, feat["rings"], extent, 2.0, Color(0.3, 0.5, 0.8), world_offset)
+
+
+## Triangulates `rings` the same way _add_polygon_flat does, but keeps the
+## triangles as flat world-space (x, z) points with no y at all - appended
+## to `tris` as {points, color} entries.
+func _collect_flat_polygon(tris: Array, rings: Array, extent: int, color: Color, world_offset: Vector2) -> void:
+	for ring in rings:
+		if ring.size() < 3:
+			continue
+		var world_ring := _world_ring(ring, extent)
+		if world_ring.size() < 3:
+			continue
+		var indices := Geometry2D.triangulate_polygon(world_ring)
+		if indices.size() == 0:
+			continue
+		for i in range(0, indices.size(), 3):
+			var a: Vector2 = world_ring[indices[i]] + world_offset
+			var b: Vector2 = world_ring[indices[i + 1]] + world_offset
+			var c: Vector2 = world_ring[indices[i + 2]] + world_offset
+			# Real-world vector data has plenty of duplicate/near-collinear
+			# vertices, so triangulate_polygon() occasionally emits
+			# degenerate slivers alongside the real triangles - Godot's
+			# CanvasItem triangulator (draw_colored_polygon) rejects those
+			# outright ("Invalid polygon data"), so skip them here instead.
+			if absf((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) < 0.001:
+				continue
+			tris.append({"points": PackedVector2Array([a, b, c]), "color": color})
+
+
+## Builds per-segment width ribbon quads (same shape math a 3D draped line
+## mesh would use), but as flat world-space (x, z) points with no y -
+## appended to `quads` as {points, color} entries.
+func _collect_flat_line(quads: Array, rings: Array, extent: int, width: float, color: Color, world_offset: Vector2) -> void:
 	for ring in rings:
 		if ring.size() < 2:
 			continue
@@ -421,90 +569,105 @@ func _add_line(st: SurfaceTool, rings: Array, extent: int, width: float, color: 
 			var a1 := a - perp + world_offset
 			var b0 := b + perp + world_offset
 			var b1 := b - perp + world_offset
-			var ya0 := _terrain_y(terrain, a0.x, a0.y, offset)
-			var ya1 := _terrain_y(terrain, a1.x, a1.y, offset)
-			var yb0 := _terrain_y(terrain, b0.x, b0.y, offset)
-			var yb1 := _terrain_y(terrain, b1.x, b1.y, offset)
-			st.set_color(color); st.add_vertex(Vector3(a0.x, ya0, a0.y))
-			st.set_color(color); st.add_vertex(Vector3(a1.x, ya1, a1.y))
-			st.set_color(color); st.add_vertex(Vector3(b1.x, yb1, b1.y))
-			st.set_color(color); st.add_vertex(Vector3(a0.x, ya0, a0.y))
-			st.set_color(color); st.add_vertex(Vector3(b1.x, yb1, b1.y))
-			st.set_color(color); st.add_vertex(Vector3(b0.x, yb0, b0.y))
-			count += 6
-	return count
+			quads.append({"points": PackedVector2Array([a0, a1, b1, b0]), "color": color})
 
 
-## All meshes (ground, lines, buildings) use normal depth testing against
-## the terrain and each other - the small per-layer Y offsets applied in
-## _render_layers (water, roads, waterways) are what keep those from
-## z-fighting, not this function. Buildings use CULL_BACK instead of the
-## default CULL_DISABLED so their own back/interior faces don't compete
-## with front faces for the same pixels; ordinary convex building
-## footprints render correctly with backface culling alone.
-func _finalize_mesh(st: SurfaceTool, node_name: String, vertex_count: int, render_priority: int = 0, no_depth_test: bool = true, cull_mode: BaseMaterial3D.CullMode = BaseMaterial3D.CULL_DISABLED) -> void:
-	if vertex_count == 0:
+## Target texel density for the baked ground texture (see
+## _build_and_apply_ground_texture) - a middle ground between crispness
+## (the narrowest roads are ~4m wide, so anything much coarser than this
+## erases them) and texture memory (the covered area is typically several
+## thousand meters across, so texel count grows fast). The pixel-size
+## clamps keep both ends sane regardless of how large or small the actual
+## covered area turns out to be.
+const GROUND_TEXTURE_METERS_PER_PIXEL := 1.25
+const GROUND_TEXTURE_MIN_SIZE := 1024
+const GROUND_TEXTURE_MAX_SIZE := 6144
+
+
+## Rasterizes `ground_tris`/`line_quads` (flat world-space shapes collected
+## by _collect_flat_layers straight from the parsed vector tiles - no
+## elevation, no 3D scene, no camera photographing anything) into a texture
+## via a plain 2D SubViewport, then hands it to `terrain` to apply on its
+## heightmap surface. Ground is drawn first, lines second, so lines always
+## paint fully over ground with no depth test or occlusion involved at all
+## - the source of the road-gap artifact the old top-down-photo approach
+## had. Does nothing if there's no geometry to draw.
+func _build_and_apply_ground_texture(ground_tris: Array, line_quads: Array, terrain: TerrainRGBLoader) -> void:
+	var bounds := Rect2()
+	var has_bounds := false
+	for entry in ground_tris + line_quads:
+		for p in entry["points"]:
+			if not has_bounds:
+				bounds = Rect2(p, Vector2.ZERO)
+				has_bounds = true
+			else:
+				bounds = bounds.expand(p)
+	if not has_bounds or bounds.size.x < 1.0 or bounds.size.y < 1.0:
 		return
-	st.generate_normals()
-	var mesh := st.commit()
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.name = node_name
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.cull_mode = cull_mode
-	mat.no_depth_test = no_depth_test
-	mat.render_priority = render_priority
-	mi.material_override = mat
-	add_child(mi)
+
+	var bbox_min := bounds.position
+	var bbox_size := bounds.size
+
+	var mpp := GROUND_TEXTURE_METERS_PER_PIXEL
+	var largest_px = max(bbox_size.x, bbox_size.y) / mpp
+	if largest_px > GROUND_TEXTURE_MAX_SIZE:
+		mpp *= largest_px / GROUND_TEXTURE_MAX_SIZE
+	elif largest_px < GROUND_TEXTURE_MIN_SIZE:
+		mpp *= largest_px / GROUND_TEXTURE_MIN_SIZE
+	var tex_w = max(1, int(round(bbox_size.x / mpp)))
+	var tex_h = max(1, int(round(bbox_size.y / mpp)))
+
+	# World (x, z) -> pixel space: Godot's 2D canvas is already +X right /
+	# +Y down, which matches +X world -> +U, +Z world -> +V exactly (same
+	# north-up convention as _to_world()'s Y/Z doc comment, and the same
+	# formula terrain_ground_texture.gdshader uses) - no flip needed.
+	var canvas := preload("res://scripts/ground_texture_canvas.gd").new()
+	var px_polys := []
+	for entry in ground_tris:
+		px_polys.append({"points": _to_px(entry["points"], bbox_min, mpp), "color": entry["color"]})
+	for entry in line_quads:
+		px_polys.append({"points": _to_px(entry["points"], bbox_min, mpp), "color": entry["color"]})
+	canvas.polygons = px_polys
+
+	var viewport := SubViewport.new()
+	viewport.size = Vector2i(tex_w, tex_h)
+	viewport.transparent_bg = true
+	add_child(viewport)
+	viewport.add_child(canvas)
+	canvas.queue_redraw()
+
+	# UPDATE_ONCE needs a couple of frames to actually land before the
+	# texture is readable.
+	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+
+	var img := viewport.get_texture().get_image()
+	viewport.queue_free()
+	if img == null:
+		push_warning("MVTTileRenderer: ground texture capture failed")
+		return
+
+	var tex := ImageTexture.create_from_image(img)
+	terrain.apply_ground_texture(tex, bbox_min, bbox_size)
 
 
-## Adds one tile's layers into the given SurfaceTools - shared across the
-## whole grid, so all tiles end up merged into three meshes total rather
-## than three per tile - offsetting every vertex by world_offset. Returns
-## per-surface vertex counts as Vector3i(ground, lines, buildings) so the
-## caller can accumulate a running total across tiles.
-func _render_layers(layers: Dictionary, terrain: TerrainRGBLoader, world_offset: Vector2, st_ground: SurfaceTool, st_lines: SurfaceTool, st_buildings: SurfaceTool) -> Vector3i:
-	# Ground: landcover, landuse, water - draped onto the terrain surface,
-	# drawn low to high so water and landuse don't z-fight with landcover.
-	var ground_count := 0
-	for lname in ["landcover", "landuse"]:
-		if not layers.has(lname):
-			continue
-		var extent: int = layers[lname]["extent"]
-		var base_color: Color = LAYER_COLORS.get(lname, Color(0.5, 0.5, 0.5))
-		for feat in layers[lname]["features"]:
-			if feat["type"] != GEOM_POLYGON:
-				continue
-			var col := base_color
-			if lname == "landuse" and feat["props"].has("class"):
-				col = LANDUSE_CLASS_COLORS.get(feat["props"]["class"], base_color)
-			ground_count += _add_polygon_draped(st_ground, feat["rings"], extent, col, terrain, 0.0, world_offset)
-	if layers.has("water"):
-		var extent: int = layers["water"]["extent"]
-		for feat in layers["water"]["features"]:
-			if feat["type"] == GEOM_POLYGON:
-				ground_count += _add_polygon_draped(st_ground, feat["rings"], extent, LAYER_COLORS["water"], terrain, -0.15, world_offset)
+func _to_px(points: PackedVector2Array, bbox_min: Vector2, mpp: float) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for p in points:
+		out.append((p - bbox_min) / mpp)
+	return out
 
-	# Roads + waterway lines, draped slightly above the ground layers.
-	var lines_count := 0
-	if layers.has("transportation"):
-		var extent: int = layers["transportation"]["extent"]
-		for feat in layers["transportation"]["features"]:
-			if feat["type"] != GEOM_LINESTRING:
-				continue
-			var cls: String = feat["props"].get("class", "minor")
-			var style = ROAD_STYLE.get(cls, ROAD_STYLE_DEFAULT)
-			lines_count += _add_line(st_lines, feat["rings"], extent, style["width"], style["color"], terrain, 0.05, world_offset)
-	if layers.has("waterway"):
-		var extent: int = layers["waterway"]["extent"]
-		for feat in layers["waterway"]["features"]:
-			if feat["type"] == GEOM_LINESTRING:
-				lines_count += _add_line(st_lines, feat["rings"], extent, 2.0, Color(0.3, 0.5, 0.8), terrain, 0.02, world_offset)
 
-	# Buildings, extruded from the terrain surface.
+## Adds one tile's building features into `st_buildings` - shared across
+## the whole grid, so all tiles end up merged into one mesh rather than one
+## per tile - offsetting every vertex by world_offset. Ground/lines are
+## handled separately, see _collect_flat_layers. Returns the added vertex
+## count so the caller can accumulate a running total across tiles.
+func _render_buildings(layers: Dictionary, terrain: TerrainRGBLoader, world_offset: Vector2, st_buildings: SurfaceTool) -> int:
 	var buildings_count := 0
 	if layers.has("building"):
+		#one_building = true
 		var extent: int = layers["building"]["extent"]
 		for feat in layers["building"]["features"]:
 			if feat["type"] != GEOM_POLYGON:
@@ -516,6 +679,13 @@ func _render_layers(layers: Dictionary, terrain: TerrainRGBLoader, world_offset:
 			var color: Color = LAYER_COLORS["building"]
 			if props.has("colour") and (props["colour"] as String).begins_with("#"):
 				color = Color(props["colour"])
-			buildings_count += _add_building(st_buildings, feat["rings"], extent, height, color, terrain, world_offset)
+			# A feature's rings can be a MultiPolygon (many disconnected
+			# footprints bundled together) - split it into its true
+			# sub-polygons first so each one gets its OWN elevation sample
+			# instead of every sub-polygon after the first silently
+			# borrowing the first one's, however far away it actually is.
+			# See _split_into_polygons.
+			for sub_rings in _split_into_polygons(feat["rings"]):
+				buildings_count += _add_building(st_buildings, sub_rings, extent, height, color, terrain, world_offset)
 
-	return Vector3i(ground_count, lines_count, buildings_count)
+	return buildings_count

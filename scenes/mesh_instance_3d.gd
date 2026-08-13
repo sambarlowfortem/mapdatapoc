@@ -1,5 +1,5 @@
 extends MeshInstance3D
-@onready var node_3d: Marker3D = $"../LatLonMarker"
+#@onready var node_3d: Marker3D = $"../LatLonMarker"
 
 
 # Called when the node enters the scene tree for the first time.
@@ -7,7 +7,7 @@ func _ready() -> void:
 	pass # Replace with function body.
 
 
-# Called every frame. 'delta' is the elapsed time since the previous frame.
-func _process(delta: float) -> void:
-	if $"../LatLonMarker":
-		global_position = $"../LatLonMarker".global_position
+## Called every frame. 'delta' is the elapsed time since the previous frame.
+#func _process(delta: float) -> void:
+	#if $"../LatLonMarker":
+		#global_position = $"../LatLonMarker".global_position

@@ -32,6 +32,12 @@ class_name TerrainRGBLoader
 @export var tile_x: int = 0
 @export var tile_y: int = 0
 
+## Real-world latitude (degrees) this grid is centered on - set by main.gd
+## alongside tile_x/tile_y. Needed to correct Web Mercator's latitude-
+## dependent scale distortion (see TileSource.ground_scale()); without it,
+## tile_size_meters is inflated by 1/cos(lat), stretching the whole map.
+@export var lat: float = 0.0
+
 ## How many tiles out from the center to load in each direction - 0 loads
 ## just the center tile, 1 loads a 3x3 grid, 2 a 5x5 grid, etc.
 @export var grid_radius: int = 0
@@ -48,8 +54,15 @@ class_name TerrainRGBLoader
 ## Requires a render_draped(terrain) method (MVTTileRenderer has one).
 @export var vector_tile_path: NodePath = ^""
 
+## Fallback/base terrain color, shown wherever apply_ground_texture()'s
+## baked texture doesn't cover (or before it's applied at all).
+const BASE_GROUND_COLOR := Color(0.5, 0.55, 0.42)
+
+const GROUND_TEXTURE_SHADER := preload("res://shaders/terrain_ground_texture.gdshader")
+
 var tile_size_meters: float = 0.0
 var _tile_images: Dictionary = {}  # Vector2i(x,y) -> Image, keyed by actual tile coords
+var _terrain_meshes: Array[MeshInstance3D] = []
 
 
 func start_loading() -> void:
@@ -58,7 +71,7 @@ func start_loading() -> void:
 		push_warning("TerrainRGBLoader: no url_template set")
 		return
 	print("READY2")
-	tile_size_meters = TileSource.size_meters(tile_z)
+	tile_size_meters = TileSource.size_meters(tile_z, lat)
 
 	var coords := TileSource.grid_coords(tile_x, tile_y, grid_radius)
 
@@ -75,7 +88,7 @@ func start_loading() -> void:
 		if img.get_format() != Image.FORMAT_RGB8 and img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGB8)
 		_tile_images[coords[i]] = img
-		var offset := TileSource.world_offset(tile_z, coords[i].x, coords[i].y, tile_z, tile_x, tile_y)
+		var offset := TileSource.world_offset(tile_z, coords[i].x, coords[i].y, tile_z, tile_x, tile_y, lat)
 		_build_heightmap(img, Vector3(offset.x, 0.0, offset.y), "Terrain_%d_%d" % [coords[i].x, coords[i].y])
 		loaded += 1
 	print("TerrainRGBLoader: loaded %d/%d tiles" % [loaded, coords.size()])
@@ -120,6 +133,24 @@ func _start_vector_tile() -> void:
 	if target.has_method("render_draped"):
 		print("CALLING RENDER DRAPED")
 		target.render_draped(self)
+
+
+## Applies `tex` (a ground/line texture rasterized directly from the parsed
+## vector tile data, see MVTTileRenderer._build_and_apply_ground_texture)
+## to every loaded terrain tile as a world-space-mapped overlay - purely so
+## that flat-texture approach can be visually compared side by side against
+## the existing draped 3D ground/line meshes, which keep rendering
+## unchanged on top of this. `bbox_min`/`bbox_size` are the world-space XZ
+## rectangle `tex` covers.
+func apply_ground_texture(tex: Texture2D, bbox_min: Vector2, bbox_size: Vector2) -> void:
+	var shader_mat := ShaderMaterial.new()
+	shader_mat.shader = GROUND_TEXTURE_SHADER
+	shader_mat.set_shader_parameter("ground_texture", tex)
+	shader_mat.set_shader_parameter("bbox_min", bbox_min)
+	shader_mat.set_shader_parameter("bbox_size", bbox_size)
+	shader_mat.set_shader_parameter("base_color", BASE_GROUND_COLOR)
+	for mi in _terrain_meshes:
+		mi.material_override = shader_mat
 
 
 ## Samples the decoded terrain elevation directly under `global_pos` (only
@@ -250,6 +281,7 @@ func _build_heightmap(img: Image, offset: Vector3, mesh_name: String) -> void:
 	mi.name = mesh_name
 	mi.position = offset
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.5, 0.55, 0.42)
+	mat.albedo_color = BASE_GROUND_COLOR
 	mi.material_override = mat
 	add_child(mi)
+	_terrain_meshes.append(mi)
