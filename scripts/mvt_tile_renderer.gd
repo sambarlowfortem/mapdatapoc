@@ -66,11 +66,14 @@ class_name MVTTileRenderer
 @export var tile_x: int = 0
 @export var tile_y: int = 0
 
-## Real-world latitude (degrees) this tile grid is centered on - set by
-## main.gd alongside tile_x/tile_y, and should match the sibling
-## TerrainRGBLoader's lat. Needed to correct Web Mercator's latitude-
-## dependent scale distortion, see TileSource.ground_scale().
+## Real-world latitude/longitude (degrees) this tile grid is centered on -
+## set by main.gd alongside tile_x/tile_y, and should match the sibling
+## TerrainRGBLoader's lat/lon. `lat` corrects Web Mercator's latitude-
+## dependent scale distortion, see TileSource.ground_scale(); both together
+## are the exact point TileSource.world_offset() places everything relative
+## to (see TerrainRGBLoader's class doc comment).
 @export var lat: float = 0.0
+@export var lon: float = 0.0
 
 ## Fallback building height (meters) when a feature has no render_height.
 @export var default_building_height: float = 8.0
@@ -202,7 +205,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				var layers := MVTParser.parse_tile(data)
 				if layers.is_empty():
 					continue
-				var world_offset := TileSource.world_offset(child_z, c.x, c.y, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				var world_offset := TileSource.world_offset(child_z, c.x, c.y, lat, lon)
 				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
 				if render_ground_and_lines:
 					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
@@ -233,7 +236,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				var layers := MVTParser.parse_tile(data)
 				if layers.is_empty():
 					continue
-				var world_offset := TileSource.world_offset(tile_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				var world_offset := TileSource.world_offset(tile_z, cx, cy, lat, lon)
 				counts += _render_buildings(layers, terrain, world_offset, st_buildings)
 				if render_ground_and_lines:
 					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)
@@ -262,7 +265,7 @@ func render_draped(terrain: TerrainRGBLoader) -> void:
 				var layers := MVTParser.parse_tile(data)
 				if layers.is_empty():
 					continue
-				var world_offset := TileSource.world_offset(outer_z, cx, cy, terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+				var world_offset := TileSource.world_offset(outer_z, cx, cy, lat, lon)
 				outer_counts += _render_buildings(layers, terrain, world_offset, st_outer_buildings)
 				if render_ground_and_lines:
 					_collect_flat_layers(layers, world_offset, ground_tris, line_quads)

@@ -23,28 +23,25 @@ static func size_meters(z: int, lat: float) -> float:
 	return EARTH_CIRCUMFERENCE_M / pow(2.0, z) * ground_scale(lat)
 
 
-## World-space (x, z) offset of tile (z,x,y)'s center relative to the center
-## of tile (origin_z,origin_x,origin_y) - works across different zoom levels,
-## e.g. placing a vector tile relative to the terrain tile's origin. `lat` is
-## the scene's reference latitude (see ground_scale()) - the area covered by
-## a loaded tile grid is small enough that using one fixed reference latitude
-## throughout, rather than each tile's own, is an acceptable approximation.
-static func world_offset(z: int, x: int, y: int, origin_z: int, origin_x: int, origin_y: int, lat: float) -> Vector2:
-	var fx := (float(x) + 0.5) / pow(2.0, z) - (float(origin_x) + 0.5) / pow(2.0, origin_z)
-	var fz := (float(y) + 0.5) / pow(2.0, z) - (float(origin_y) + 0.5) / pow(2.0, origin_z)
-	return Vector2(fx, fz) * (EARTH_CIRCUMFERENCE_M * ground_scale(lat))
-
-
-## World-space (x, z) position of (lat, lon) relative to the center of tile
-## (origin_z,origin_x,origin_y) - like world_offset(), but for an exact
-## lat/lon instead of a tile index, using the same continuous Web Mercator
-## projection lat_lon_to_tile() floors to get a tile coordinate.
-static func lat_lon_to_world(lat: float, lon: float, origin_z: int, origin_x: int, origin_y: int) -> Vector2:
-	var n := pow(2.0, origin_z)
-	var lat_rad := deg_to_rad(lat)
-	var fx := (lon + 180.0) / 360.0 * n
-	var fy := (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) / 2.0 * n
-	return Vector2(fx - (float(origin_x) + 0.5), fy - (float(origin_y) + 0.5)) * (EARTH_CIRCUMFERENCE_M * ground_scale(lat) / n)
+## World-space (x, z) offset of tile (z,x,y)'s center relative to the exact
+## real-world point (ref_lat, ref_lon) - this is the scene's real-world
+## origin (see TerrainRGBLoader's class doc comment), so this is what places
+## every tile (terrain, vector, satellite) correctly regardless of zoom.
+## Works across different zoom levels because tile position is first
+## expressed as a fraction of the whole world (dimensionless, zoom-
+## independent) before the reference point is subtracted. `ref_lat` doubles
+## as the scene's reference latitude for ground_scale()'s Web Mercator scale
+## correction - the area covered by a loaded tile grid is small enough that
+## using one fixed reference latitude throughout, rather than each tile's
+## own, is an acceptable approximation.
+static func world_offset(z: int, x: int, y: int, ref_lat: float, ref_lon: float) -> Vector2:
+	var n := pow(2.0, z)
+	var ref_lat_rad := deg_to_rad(ref_lat)
+	var ref_fx := (ref_lon + 180.0) / 360.0
+	var ref_fy := (1.0 - log(tan(ref_lat_rad) + 1.0 / cos(ref_lat_rad)) / PI) / 2.0
+	var fx := (float(x) + 0.5) / n - ref_fx
+	var fz := (float(y) + 0.5) / n - ref_fy
+	return Vector2(fx, fz) * (EARTH_CIRCUMFERENCE_M * ground_scale(ref_lat))
 
 
 ## Substitutes {z}/{x}/{y} placeholders in a URL template.

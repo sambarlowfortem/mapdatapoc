@@ -75,8 +75,11 @@ class_name SatelliteTileLoader
 @export var tile_x: int = 0
 @export var tile_y: int = 0
 
-## Real-world latitude (degrees), same as MVTTileRenderer.lat/TerrainRGBLoader.lat.
+## Real-world latitude/longitude (degrees), same as
+## MVTTileRenderer.lat/lon/TerrainRGBLoader.lat/lon - the exact point
+## TileSource.world_offset() places everything relative to.
 @export var lat: float = 0.0
+@export var lon: float = 0.0
 
 ## Target texel density (meters/pixel) for the overlay mosaic. Real
 ## satellite tiles are fixed-resolution (typically 256x256), so the center
@@ -294,7 +297,7 @@ func _fetch_tiles(template: String, specs: Array, terrain: TerrainRGBLoader) -> 
 			push_warning("SatelliteTileLoader: could not decode tile z=%d x=%d y=%d" % [t["z"], t["x"], t["y"]])
 			continue
 		var size := TileSource.size_meters(t["z"], lat)
-		var center := TileSource.world_offset(t["z"], t["x"], t["y"], terrain.tile_z, terrain.tile_x, terrain.tile_y, lat)
+		var center := TileSource.world_offset(t["z"], t["x"], t["y"], lat, lon)
 		var rect := Rect2(center - Vector2(size, size) * 0.5, Vector2(size, size))
 		entries.append({"image": img, "rect": rect})
 		bounds = rect if not has_bounds else bounds.merge(rect)

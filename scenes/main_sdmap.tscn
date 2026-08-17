@@ -43,10 +43,10 @@ script = ExtResource("4_satld")
 base_url_template = "http://172.16.0.250:8089/data/satellite_lowres/{z}/{x}/{y}.jpg"
 overlay_url_template = "https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key=2Bb9P9YUVDxBT88Aj26I"
 overlay_fallback_url_template = "http://172.16.0.250:8089/data/satellite_lowres/{z}/{x}/{y}.jpg"
-overlay_tint = Color(0.909, 0.791, 0.451, 1)
+overlay_tint = Color(0.9098039, 0.7921569, 0.4509804, 1)
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1059086227]
-transform = Transform3D(1, 0, 0, 0, 0.83195406, 0.5548445, 0, -0.5548445, 0.83195406, -4170.631, 1563.006, 216.504)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
 far = 100000.0
 
 [node name="Node3D" type="Node3D" parent="." unique_id=1784134145]

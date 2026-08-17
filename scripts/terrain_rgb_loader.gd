@@ -2,9 +2,12 @@
 ## DEM, MapTiler/Mapbox style: height = -10000 + (R*65536 + G*256 + B) * 0.1),
 ## centered on (tile_z, tile_x, tile_y), and builds a heightmap mesh for each
 ## at full extent (no cropping) - that way any georeferencing mismatch shows
-## up visually instead of being hidden. The center tile's center is world
-## (0,0,0); every other loaded tile (terrain or vector) is placed relative
-## to it. Once the whole grid has loaded, triggers the vector tile node (see
+## up visually instead of being hidden. The exact real-world (lat, lon) this
+## grid is centered on is world (0,0,0): horizontally via TileSource.world_offset()
+## (every other loaded tile - terrain, vector, or satellite - is placed
+## relative to that same point), and vertically via _compute_origin_elevation(),
+## which shifts every decoded elevation so the real ground surface at (lat,
+## lon) sits exactly at world y=0. Once the whole grid has loaded, triggers the vector tile node (see
 ## `vector_tile_path`) to render draped onto this terrain's surface via
 ## get_elevation_at_global().
 ##
@@ -26,17 +29,21 @@ class_name TerrainRGBLoader
 ## "http://172.16.0.250:8089/data/terrain/{z}/{x}/{y}.webp".
 @export var url_template: String = ""
 
-## Zoom/x/y of the CENTER tile of the grid - this tile's center becomes
-## world (0,0,0).
+## Zoom/x/y of the CENTER tile of the grid - must contain (lat, lon), which
+## is the actual world (0,0,0) reference point (see class doc comment), not
+## necessarily this tile's own center.
 @export var tile_z: int = 11
 @export var tile_x: int = 0
 @export var tile_y: int = 0
 
-## Real-world latitude (degrees) this grid is centered on - set by main.gd
-## alongside tile_x/tile_y. Needed to correct Web Mercator's latitude-
+## Real-world latitude/longitude (degrees) this grid is centered on - set by
+## main.gd alongside tile_x/tile_y. `lat` corrects Web Mercator's latitude-
 ## dependent scale distortion (see TileSource.ground_scale()); without it,
-## tile_size_meters is inflated by 1/cos(lat), stretching the whole map.
+## tile_size_meters is inflated by 1/cos(lat), stretching the whole map. Both
+## are also the exact point that becomes world (0,0,0) - see
+## TileSource.world_offset() and _compute_origin_elevation().
 @export var lat: float = 0.0
+@export var lon: float = 0.0
 
 ## How many tiles out from the center to load in each direction - 0 loads
 ## just the center tile, 1 loads a 3x3 grid, 2 a 5x5 grid, etc.
@@ -70,6 +77,11 @@ var _tile_images: Dictionary = {}  # Vector2i(x,y) -> Image, keyed by actual til
 var _terrain_meshes: Array[MeshInstance3D] = []
 var _ground_shader_mat: ShaderMaterial = null
 
+## Raw (unshifted) decoded elevation at the exact (lat, lon) point - every
+## decoded elevation is shifted by this (see _sample_grid_elevation()) so
+## that point sits at world y=0. Computed once, up front, in start_loading().
+var origin_elevation: float = 0.0
+
 
 func start_loading() -> void:
 	print("READY")
@@ -78,6 +90,7 @@ func start_loading() -> void:
 		return
 	print("READY2")
 	tile_size_meters = TileSource.size_meters(tile_z, lat)
+	origin_elevation = await _compute_origin_elevation()
 
 	var coords := TileSource.grid_coords(tile_x, tile_y, grid_radius)
 
@@ -94,13 +107,50 @@ func start_loading() -> void:
 		if img.get_format() != Image.FORMAT_RGB8 and img.get_format() != Image.FORMAT_RGBA8:
 			img.convert(Image.FORMAT_RGB8)
 		_tile_images[coords[i]] = img
-		var offset := TileSource.world_offset(tile_z, coords[i].x, coords[i].y, tile_z, tile_x, tile_y, lat)
+		var offset := TileSource.world_offset(tile_z, coords[i].x, coords[i].y, lat, lon)
 		_build_heightmap(img, Vector3(offset.x, 0.0, offset.y), "Terrain_%d_%d" % [coords[i].x, coords[i].y])
 		loaded += 1
 	print("TerrainRGBLoader: loaded %d/%d tiles" % [loaded, coords.size()])
 
 	_trigger_draped_renderer(vector_tile_path, "vector_tile_path")
 	_trigger_draped_renderer(satellite_tile_path, "satellite_tile_path")
+
+
+## Fetches the center tile (tile_z, tile_x, tile_y) and interpolates the raw
+## elevation at the exact fractional position (lat, lon) falls at within it -
+## this becomes the y=0 reference for every subsequently decoded elevation
+## (see _sample_grid_elevation()). Interpolates through the exact same
+## strided grid _build_heightmap()/get_elevation_at_global() use (see
+## _interpolate_grid()) rather than an independent full-resolution pixel
+## lookup - the two can disagree substantially on steep terrain once
+## sample_stride > 1, and only sampling through the same path guarantees
+## get_elevation_at_global() at (lat, lon) itself comes out to exactly 0
+## afterward. Also caches the decoded image in _tile_images so start_loading()'s
+## main loop doesn't need to refetch it. Returns 0.0 (no vertical shift) if
+## the center tile can't be fetched/decoded.
+func _compute_origin_elevation() -> float:
+	var data: PackedByteArray = await _cached_get(url_template, tile_z, tile_x, tile_y)
+	if data.is_empty():
+		push_warning("TerrainRGBLoader: could not fetch center tile to compute origin elevation, ground level will not be zeroed at (lat, lon)")
+		return 0.0
+	var img := _image_from_buffer(data, url_template)
+	if img == null:
+		push_warning("TerrainRGBLoader: could not decode center tile to compute origin elevation, ground level will not be zeroed at (lat, lon)")
+		return 0.0
+	if img.get_format() != Image.FORMAT_RGB8 and img.get_format() != Image.FORMAT_RGBA8:
+		img.convert(Image.FORMAT_RGB8)
+	_tile_images[Vector2i(tile_x, tile_y)] = img
+
+	var n := pow(2.0, tile_z)
+	var lat_rad := deg_to_rad(lat)
+	var fx: float = (lon + 180.0) / 360.0 * n - tile_x
+	var fy: float = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / PI) / 2.0 * n - tile_y
+
+	var cols = max(1, img.get_width() / sample_stride)
+	var rows = max(1, img.get_height() / sample_stride)
+	var gx_cont: float = clamp(fx * cols, 0.0, float(cols))
+	var gy_cont: float = clamp(fy * rows, 0.0, float(rows))
+	return _interpolate_grid(img, gx_cont, gy_cont, cols, rows, true)
 
 
 ## Returns tile (z,x,y) from `template`'s on-disk cache (see TileCache) if
@@ -210,7 +260,15 @@ func _get_or_create_ground_shader_mat() -> ShaderMaterial:
 func get_elevation_at_global(global_pos: Vector3) -> float:
 	if tile_size_meters == 0.0:
 		return 0.0
-	var local := to_local(global_pos)
+	# The tile-index math below (cx/cy/key) assumes local (0,0,0) is the
+	# CENTER tile's own center, e.g. local.x == 0.5*tile_size_meters would be
+	# its east edge. But world (0,0,0) is actually (lat, lon) now (see class
+	# doc comment), which generally sits off-center within that tile - so
+	# undo that same offset here first (TileSource.world_offset() of the
+	# center tile relative to (lat, lon) is exactly how far its center is
+	# from world (0,0,0)) to get back into tile-center-relative space.
+	var origin_offset := TileSource.world_offset(tile_z, tile_x, tile_y, lat, lon)
+	var local := to_local(global_pos) - Vector3(origin_offset.x, 0.0, origin_offset.y)
 	var cx := int(round(local.x / tile_size_meters))
 	var cy := int(round(local.z / tile_size_meters))
 	var key := Vector2i(tile_x + cx, tile_y + cy)
@@ -226,15 +284,29 @@ func get_elevation_at_global(global_pos: Vector3) -> float:
 	# Continuous position in the same grid space _build_heightmap() uses.
 	var gx_cont: float = clamp(fx * cols, 0.0, float(cols))
 	var gy_cont: float = clamp(fz * rows, 0.0, float(rows))
+	return _interpolate_grid(img, gx_cont, gy_cont, cols, rows, false)
+
+
+## Barycentric-interpolates elevation at continuous grid position (gx_cont,
+## gy_cont) within `img`'s strided (cols x rows) height grid - the exact same
+## grid quad + diagonal triangle split _build_heightmap() renders, shared so
+## get_elevation_at_global() (raw=false) and _compute_origin_elevation()
+## (raw=true) both always agree with the actual rendered surface instead of
+## an independently-sampled lookup that could drift out of sync with it.
+## raw=true samples via _raw_grid_elevation (no origin_elevation shift, no
+## height_exaggeration - needed to compute origin_elevation itself without
+## circularity); raw=false via _sample_grid_elevation (the consumer-facing,
+## fully shifted+exaggerated value).
+func _interpolate_grid(img: Image, gx_cont: float, gy_cont: float, cols: int, rows: int, raw: bool) -> float:
 	var gx0: int = clamp(int(gx_cont), 0, cols - 1)
 	var gy0: int = clamp(int(gy_cont), 0, rows - 1)
 	var u: float = gx_cont - gx0
 	var v: float = gy_cont - gy0
 
-	var h00 := _sample_grid_elevation(img, gx0, gy0)
-	var h10 := _sample_grid_elevation(img, gx0 + 1, gy0)
-	var h01 := _sample_grid_elevation(img, gx0, gy0 + 1)
-	var h11 := _sample_grid_elevation(img, gx0 + 1, gy0 + 1)
+	var h00 := _raw_grid_elevation(img, gx0, gy0) if raw else _sample_grid_elevation(img, gx0, gy0)
+	var h10 := _raw_grid_elevation(img, gx0 + 1, gy0) if raw else _sample_grid_elevation(img, gx0 + 1, gy0)
+	var h01 := _raw_grid_elevation(img, gx0, gy0 + 1) if raw else _sample_grid_elevation(img, gx0, gy0 + 1)
+	var h11 := _raw_grid_elevation(img, gx0 + 1, gy0 + 1) if raw else _sample_grid_elevation(img, gx0 + 1, gy0 + 1)
 
 	# Same diagonal split _build_heightmap() triangulates: (p00,p10,p11)
 	# covers u>=v, (p00,p11,p01) covers v>=u - barycentric height on
@@ -245,15 +317,21 @@ func get_elevation_at_global(global_pos: Vector3) -> float:
 		return h00 * (1.0 - v) + h01 * (v - u) + h11 * u
 
 
+## Raw (unshifted, unexaggerated) elevation at strided grid point (gx, gy) of
+## `img` - see _interpolate_grid().
+func _raw_grid_elevation(img: Image, gx: int, gy: int) -> float:
+	var px: int = min(gx * sample_stride, img.get_width() - 1)
+	var py: int = min(gy * sample_stride, img.get_height() - 1)
+	return _decode_elevation_raw(img.get_pixel(px, py))
+
+
 ## Elevation at strided grid point (gx, gy) of `img`, decoded exactly the
 ## way _build_heightmap() samples its height grid - shared so
 ## get_elevation_at_global() always interpolates the identical surface the
 ## mesh was actually built from, rather than a separately-tuned lookup that
 ## could drift out of sync with it.
 func _sample_grid_elevation(img: Image, gx: int, gy: int) -> float:
-	var px: int = min(gx * sample_stride, img.get_width() - 1)
-	var py: int = min(gy * sample_stride, img.get_height() - 1)
-	return _decode_elevation(img.get_pixel(px, py)) * height_exaggeration
+	return (_raw_grid_elevation(img, gx, gy) - origin_elevation) * height_exaggeration
 
 
 ## Decodes an image buffer, picking the format from the URL's extension
@@ -271,7 +349,7 @@ func _image_from_buffer(data: PackedByteArray, url: String) -> Image:
 	return img
 
 
-func _decode_elevation(c: Color) -> float:
+func _decode_elevation_raw(c: Color) -> float:
 	var r := int(round(c.r * 255.0))
 	var g := int(round(c.g * 255.0))
 	var b := int(round(c.b * 255.0))
